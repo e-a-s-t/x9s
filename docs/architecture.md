@@ -1,41 +1,39 @@
 # Architecture
 
-**Status: Phase 1 implementation.**
+**Status: ProviderConfig navigation and relationship graph implemented; see limitations below.**
+
+## Layers
+
+1. **Core discovery:** kube-rs loads installed CRDs, resolves served group/version/kind/plural/scope through Kubernetes API discovery, lists CRD objects asynchronously, fetches exact authoritative referenced targets when needed, normalizes status and identity, and reports partial failures. Successful API discovery is cached on the reusable Kubernetes client between refreshes.
+2. **Relationship graph:** Core builds typed edges from Crossplane composition resource references, Kubernetes owner references, fully qualified resource references, resolvable label selectors, ProviderConfig references, and schema-backed provider relationships. ProviderConfig references use explicit API identity, CRD schema kind defaults, provider ownership, and Crossplane API model context; ambiguous references stay unresolved. The graph is global and independent of TUI state.
+3. **TUI:** Ratatui renders ProviderConfig selection, resource list/tree, details, YAML, Events, and describe views. Crossterm input updates navigation, history, filtering, expansion, and refresh state. Rendering does not issue Kubernetes requests; Events and refresh are asynchronous Core operations.
+4. **CLI:** clap continues to expose Managed Resource listing and diagnostics using the same normalized Core report. The TUI's broader object set does not change the CLI data contract.
+
+## Identity and discovery
+
+Graph identity includes API version, group, kind, namespace, name, and UID when available. API discovery determines namespaced versus cluster scope; resource names and kinds are not assumed to be globally unique. Discovery lists MR, XR, ProviderConfig, and Crossplane diagnostic object instances; unrelated referenced targets are fetched by exact identity. Definitions are not treated as instances. ProviderConfigs without associated resources remain selectable. Unassigned resources have no ProviderConfig reference; unresolved references have their own selector entry and remain visible in `:all`.
+
+Managed Resource classification remains conservative. Only confirmed Managed Resources are returned by the existing CLI contract. The TUI displays actual MR and XR objects plus exact referenced targets; Crossplane control-plane instances are confined to `:system`. An API or RBAC failure for one CRD is recorded as a partial discovery error while other types continue. Relationship resolution happens after listing and cannot remove an instance from `:all`.
+
+## Relationships
+
+The graph preserves `COMPOSES`, `MANAGED_BY`, `REFERENCES`, `OWNS`, `SELECTS`, and `BELONGS_TO` edge types. Crossplane `status.resourceRefs` and supported `spec.resourceRefs` create composition edges; owner references create ownership edges. Explicit `*Ref` and `*Refs` values resolve only when they carry API version, kind, and name. Selector edges resolve only for selectors that include API version, kind, and matchLabels. VCD's VM schema declares `forProvider.vappName` as a vApp relationship; it resolves by provider identity and external name, and the tree projects this known `BELONGS_TO` direction as VApp parent to VM child. Other scalar fields are not guessed as references.
+
+## TUI behavior
+
+The initial screen lists ProviderConfigs, All Providers, Unassigned, and Unresolved ProviderConfig resources. ProviderConfig counts are unique managed-resource instances, independent of edge or tree multiplicity. Resource navigation supports tree and flat modes, filtering, details, sanitized YAML, Kubernetes Events, describe output, health filtering, command mode, and navigation history. `:system` opens the Crossplane diagnostic object inventory. YAML redacts Secret data/stringData and credential-like fields before rendering.
+
+## Limitations
+
+- Discovery lists installed CRDs, not every built-in Kubernetes API type. Exact built-in targets are fetched when authoritative references identify them; they can remain unresolved when target identity, namespace, discovery, or RBAC is insufficient.
+- ProviderConfig reference association requires explicit reference identity or provider ownership plus compatible API model/schema defaults. If that identity is insufficient, the resource remains unresolved rather than being linked by name alone.
+- Generic name-only `*Ref` fields cannot be safely mapped to target kinds without authoritative target metadata; those edges are not guessed. Generic selectors resolve only when they include target API version and kind.
+- Resource tree paths use composition, ownership, and registered schema-backed directional relationships. Multi-parent objects can appear in multiple paths; recursion is guarded per path to prevent cycles.
+- Endpoint values are not extracted; ProviderConfig identity is shown to avoid exposing provider-specific sensitive configuration.
+- Events require RBAC to list Events in the object's namespace (or cluster-wide for cluster-scoped objects).
 
 ## Development environment
 
 Devbox pins the Rust toolchain and development utilities. Cargo manages application dependencies and package metadata; `Cargo.toml` is the version source of truth. See [development](development.md).
 
-## Layers
-
-1. **Core:** initializes kube-rs using the selected kubeconfig context, discovers served APIs and scopes, classifies Crossplane resources, lists dynamic resources, normalizes safe resource fields, interprets conditions, and returns structured diagnostics/errors.
-2. **TUI:** manages list, filter, details, loading, and error state; Ratatui renders views and Crossterm supplies terminal input and events. Terminal setup is isolated to this interface.
-3. **CLI:** clap parses commands and options, dispatches Core operations, formats tables or JSON, and maps errors and partial results to documented process exit codes. It does not initialize Ratatui or require a TTY.
-
-Both interfaces use the same Core API. The UI does not issue Kubernetes requests. Async operations deliver results to application state so rendering and keyboard input remain responsive. Malformed or absent conditions are handled as unknown/missing, not as success. CLI JSON writes requested data only to stdout and structured errors to stderr.
-
-## Discovery and scope
-
-Discovery uses installed Kubernetes API and CRD information rather than provider-specific kind lists. For each confirmed or possible Managed Resource CRD, the adapter resolves group, served version, kind, plural, LIST capability, and scope against Kubernetes API discovery. It uses kube-rs `pinned_group` discovery for each CRD group/version and caches that result for subsequent CRDs in the same version. A discovery failure is recorded for that group/version and skipped while other groups and versions continue. Matching resources use the discovered scope to construct the dynamic API request and are listed independently, so one failed list does not stop other types. Crossplane classification combines schema, ownership/metadata conventions, and available object-level evidence; see [Crossplane compatibility](crossplane.md). Only confirmed Managed Resources appear in the default list; possible candidates remain in the internal discovery result.
-
-Discovery diagnostics include the selected context, CRD and classification counts, possible-classification reasons, per-group/version discovery failures and dynamic API matching problems, per-type list outcomes, and normalized totals. Discovery continues across independent group/version and resource-list failures, retaining successful resources and reporting partial results. Failure to connect or list CRDs is fatal rather than an empty result. Set `X9S_LOG_FILE` to append structured diagnostics to a file. `RUST_LOG` controls the filter; when no log file is configured, diagnostics use a warning-level sink and do not write over the terminal UI or CLI stdout.
-
-Kubernetes may return an empty string in a list response's `metadata.continue` field to indicate that pagination is complete. The CRD and resource paginators treat both an absent and empty continuation token as completion. Previously, the empty string was treated as another page token, causing x9s to repeatedly request the same page and remain in loading state.
-
-Both interfaces are focused on confirmed Managed Resources. Other Crossplane families are classified internally, but do not have separate browser views or list commands. The TUI retains its last successful resource list on refresh errors; the CLI returns successfully discovered resources with exit code 3 when discovery or listing is partial.
-
-## Security and scope
-
-The application is read-only and requires no cluster-side installation. It follows kubeconfig authentication, TLS, RBAC, and namespace scope. It does not inspect Secret values or log credentials. YAML and Events views, relationship navigation, and resource modifications are outside Phase 1.
-
-## Design decisions
-
-- **D001:** Rust + Ratatui + Crossterm for the terminal UI.
-- **D002:** kube-rs dynamic APIs for arbitrary installed resource types.
-- **D003:** Read-only initial release.
-- **D004:** Kubernetes transport, Crossplane interpretation, normalized model, TUI, and CLI are separate responsibilities; both interfaces use Core.
-- **D005:** Conservative three-way classification; uncertain resources are not promoted into the default MR list.
-
-## Terminal UI reference
-
-Use the [official Ratatui documentation](https://ratatui.rs/) for framework guidance and current conventions. Do not introduce another TUI framework without a concrete need.
+Ratatui and Crossterm remain mandatory. Kubernetes transport and Crossplane interpretation stay in Core, separate from TUI and CLI presentation. The application is read-only, follows kubeconfig authentication/TLS/RBAC, and never logs credentials or Secret values.

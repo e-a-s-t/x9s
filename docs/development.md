@@ -86,4 +86,4 @@ The project is intended to use GitHub for source hosting and code review. See [G
 
 ## Phase 1 behavior
 
-The application defaults to the read-only TUI and also provides non-interactive `get managed` and `diagnose` commands. Both interfaces accept a kubeconfig context override and share Core discovery and normalization. Possible MRs are retained internally and excluded from the default list. Resource details, filtering, refresh, and condition parsing are part of the TUI. YAML and Events views are not implemented. See [usage](usage.md), [agent usage](agents.md), [Crossplane compatibility](crossplane.md), and [roadmap](roadmap.md).
+The application defaults to the read-only TUI and also provides non-interactive `get managed` and `diagnose` commands. Both interfaces share Core discovery and normalization; the CLI remains focused on confirmed Managed Resources. The TUI adds ProviderConfig navigation, a global relationship graph, filtering, refresh, resource details, sanitized YAML, Events, and describe views. See [usage](usage.md), [agent usage](agents.md), [Crossplane compatibility](crossplane.md), and [roadmap](roadmap.md).

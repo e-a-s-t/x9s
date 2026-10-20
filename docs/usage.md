@@ -56,23 +56,34 @@ X9S_LOG_FILE=/tmp/x9s-discovery.log RUST_LOG=debug x9s
 
 The file is append-only. When configured, the default log level is `info`; `RUST_LOG` overrides the filter. Without a log file, warning-level events go to a sink. Logs contain context, discovery and classification totals, Possible classification reasons, API matching, and per-type listing outcomes. Avoid sharing kubeconfig contents, tokens, Secret values, or private infrastructure identifiers.
 
-## TUI resource list
+## TUI navigation
 
-The table shows Kind, Name, Namespace, Synced, Ready, and Age. Cluster-scoped resources show `-` for namespace. Condition labels distinguish True, False, Unknown, and Missing; status is not conveyed by color alone. The list supports keyboard selection and scrolling. Refresh preserves the selected resource when it remains present. On refresh failure, x9s reports the error and retains the last successful list.
+The initial screen lists discovered ProviderConfigs, All Providers, Unassigned resources, and Unresolved ProviderConfig references. ProviderConfig identities include API group, kind, namespace when applicable, and name. Counts include unique managed-resource instances. Selecting a ProviderConfig shows its associated managed resources; unresolved resources remain visible in All Providers and under Unresolved ProviderConfig. All Providers includes discovered infrastructure instances and exact referenced targets, not CRD definitions or Crossplane internals. Use `:system` for Crossplane diagnostic objects.
 
 | Key | Action |
 | --- | --- |
 | `j` / `Down` | Select the next resource |
 | `k` / `Up` | Select the previous resource |
-| `Enter` | Open selected resource details |
-| `Esc` | Close details or leave filter entry |
-| `/` | Enter a case-insensitive filter for kind, name, or namespace |
-| `r` | Refresh resources |
+| `Enter` | Open selected ProviderConfig/resource; in details, open the selected related resource |
+| `Esc` | Return through navigation history |
+| `/` | Filter the current ProviderConfig or resource view |
+| `:` | Enter a command |
+| `p` | Open the ProviderConfig selector |
+| `t` | Toggle tree and flat resource views |
+| `h` / `Left` | Collapse the selected tree node |
+| `l` / `Right` | Expand the selected tree node |
+| `y` | Show sanitized resource YAML from details |
+| `d` | Describe the selected resource from details |
+| `e` | Load Kubernetes Events from details |
+| `r` | Refresh resources while preserving navigation state |
+| `?` | Show help |
 | `q` | Quit |
 | `Ctrl+C` | Exit |
 
-The details view shows API version, kind, name, namespace, UID, creation time, external name when available, Ready and Synced status, and available condition reasons/messages. Missing fields are shown as unavailable rather than inferred.
+In details, `j`/`k` selects a related resource and `Enter` navigates to it. `/` filters ProviderConfigs by identity/status and resources by name, kind, namespace, or status. Commands are `:providers`, `:all`, `:tree`, `:flat`, `:system`, `:health`, and `:context`; use `:context <name>` to switch kubeconfig contexts.
+
+The details view shows API identity, namespace, UID, external name when available, Ready and Synced conditions, and discovered relationships. YAML and describe output redact Secret payload fields and credential-like keys. Event listing is asynchronous and follows Kubernetes RBAC.
 
 ## Scope
 
-Only confirmed Managed Resources appear in the default list. Possible Managed Resources are retained internally but are not exposed as a separate command or TUI toggle. YAML inspection, Kubernetes Events, relationship navigation, and dedicated screens for other Crossplane families are not implemented. See [Crossplane compatibility](crossplane.md).
+The TUI lists actual infrastructure instances from discovered APIs; CRDs are never shown as instances. Unresolved ProviderConfig references remain accessible in `:all` and in their own selector entry. The CLI remains focused on confirmed Managed Resources. See [architecture](architecture.md) for discovery and graph limitations, and [Crossplane compatibility](crossplane.md) for classification behavior.

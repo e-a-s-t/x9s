@@ -21,6 +21,19 @@ Unit tests use fixtures and do not require Kubernetes:
 - CLI JSON stdout contains no terminal control sequences or logs; errors use structured stderr output; empty completed discovery is success while connectivity failure is fatal.
 - Partial discovery/list failures preserve successfully discovered resources and return exit code 3.
 
+Additional graph and TUI unit coverage:
+
+- Stable graph identities include API version, scope, namespace, name, and UID when available.
+- Typed composition, ownership, fully qualified reference, ProviderConfig, and selector edges; unresolved references and cycles remain safe.
+- ProviderConfig association requires explicit identity or shared provider CRD owner UID, so same-named configs from different providers do not cross-link.
+- CRD definitions, ProviderRevisions, ProviderConfigUsages, and other Crossplane control-plane objects stay out of the default infrastructure tree and remain accessible in `:system`.
+- ProviderConfig schema defaults, namespaced and cluster-scoped configs, unresolved references, and v1/v2 API-model matching are covered without name-only cross-provider assignment.
+- VCD's schema-declared `VM.spec.forProvider.vappName` resolves directionally to a VApp by external name and matching ProviderConfig; tree presentation displays VApp above VM.
+- ProviderConfig counts deduplicate managed-resource identities; unresolved resources remain present in All Providers regardless of relationship resolution.
+- Explicit tree rows retain branch depth, expand/collapse state, and selection across refresh; a known inverse `BELONGS_TO` relationship is projected as a parent-child path.
+- TUI filtering, history, tree/flat selection, and refresh preserve resource identity and view state.
+- YAML presentation redacts Secret payloads and credential-like values while retaining safe fields.
+
 Run them with `devbox run test` or as part of `devbox run ci`.
 
 ## Manual acceptance scenarios
@@ -45,5 +58,9 @@ These scenarios require a configured terminal and, where noted, a reachable clus
 | M14 | Kubernetes is unreachable in JSON mode | Fatal structured error on stderr and nonzero fatal exit; never an empty success | Unreachable context |
 | M15 | Completed discovery finds no instances | Empty table/JSON array and exit code 0 | Empty reachable cluster |
 | M16 | Select an alternate kubeconfig context | TUI and CLI use the requested context without changing the active kubeconfig context | Two configured contexts |
+| M17 | Select a ProviderConfig with the same name in another provider group | Only matching provider-owned resources are associated; unresolved resources remain accessible | Cluster with multiple providers |
+| M18 | Navigate to a related resource in another ProviderConfig | The view switches to the target configuration and Esc restores the original details/list state | Cross-provider reference |
+| M19 | Use `:context <name>` | Discovery reconnects to the requested kubeconfig context without exiting the TUI | Two configured contexts |
+| M20 | Open YAML for Secret or credential-bearing objects | Secret payload and credential-like fields appear redacted | Fixture or test data |
 
 Live-cluster behavior is verified only after x9s successfully connects to a cluster. Unit tests and local TUI startup do not establish Kubernetes connectivity.

@@ -49,6 +49,7 @@ pub enum ResourceFamily {
     Function,
     FunctionRevision,
     ProviderConfig,
+    System,
     Other,
 }
 
@@ -65,8 +66,23 @@ impl ResourceFamily {
             Self::Function => "Function",
             Self::FunctionRevision => "FunctionRevision",
             Self::ProviderConfig => "ProviderConfig",
+            Self::System => "Crossplane System",
             Self::Other => "Other",
         }
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(
+            self,
+            Self::CompositeResourceDefinition
+                | Self::Composition
+                | Self::CompositionRevision
+                | Self::Provider
+                | Self::ProviderRevision
+                | Self::Function
+                | Self::FunctionRevision
+                | Self::System
+        )
     }
 }
 
@@ -80,14 +96,46 @@ pub struct Resource {
     pub name: String,
     pub namespace: Option<String>,
     pub uid: Option<String>,
+    /// UID of the installed Crossplane Provider/ProviderRevision that owns the
+    /// CRD, used to scope name-only providerConfigRef resolution safely.
+    pub provider_owner_uid: Option<String>,
+    /// Kind default declared by the Managed Resource CRD's providerConfigRef schema.
+    pub provider_config_default_kind: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub external_name: Option<String>,
     pub synced: Condition,
     pub ready: Condition,
     pub family: ResourceFamily,
+    /// True when the installed CRD schema declares VCD VM-to-vApp semantics.
+    pub vcd_vapp_name_reference: bool,
     pub classification: Classification,
     #[allow(dead_code)] // Retained for future object inspection views.
     pub original: Value,
+}
+
+/// Identity for a Kubernetes object in the relationship graph. UID is retained
+/// separately from the address so a recreated object can be distinguished.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ResourceId {
+    pub api_version: String,
+    pub group: String,
+    pub kind: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub uid: Option<String>,
+}
+
+impl Resource {
+    pub fn id(&self) -> ResourceId {
+        ResourceId {
+            api_version: self.api_version.clone(),
+            group: self.group.clone(),
+            kind: self.kind.clone(),
+            namespace: self.namespace.clone(),
+            name: self.name.clone(),
+            uid: self.uid.clone(),
+        }
+    }
 }
 
 /// Presentation-safe resource shape shared by the TUI and command-line output.

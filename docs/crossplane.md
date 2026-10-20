@@ -4,7 +4,7 @@
 
 ## Resource families
 
-Discovery recognizes Crossplane resource families, including Managed Resources (MRs), Composite Resources (XRs), CompositeResourceDefinitions (XRDs), Compositions and CompositionRevisions, Providers and ProviderRevisions, Functions and FunctionRevisions, and ProviderConfigs. The interface in this phase is focused on confirmed MRs; family recognition does not imply a dedicated view for every family.
+Discovery recognizes Crossplane resource families, including Managed Resources (MRs), Composite Resources (XRs), definitions, compositions, provider internals, and ProviderConfigs. CRDs are discovery metadata; only listed Kubernetes objects become resource rows. The default TUI shows infrastructure instances and exact referenced targets, while `:system` exposes Crossplane diagnostic objects. The non-interactive `get managed` contract remains limited to confirmed MRs.
 
 Provider-specific kinds and API groups are not maintained in a static list. API resources are discovered from the cluster. Scope is taken from Kubernetes discovery, supporting both cluster-scoped resources and namespaced resources, including Crossplane v2 namespaced MRs.
 
@@ -22,7 +22,7 @@ At the CRD level, strong MR schema evidence requires both `spec.forProvider` and
 
 Weaker schema evidence with `spec.forProvider` yields Possible. For a Possible candidate with `spec.forProvider`, object-level signals can add evidence: the `crossplane.io/external-name` annotation, `spec.providerConfigRef`, Ready/Synced conditions, and owner references. Two or more of those object-level signals promote the candidate to Confirmed. A generic `forProvider` field or an API group containing `crossplane` alone is not enough to confirm an MR. Possible candidates remain excluded from the default list, with the CRD evidence reasons available in diagnostic logs.
 
-Only confirmed MRs appear in the default resource table. Possible MRs are retained in the internal classification/discovery results so future inspection and configuration can expose them without changing provider-specific code. This version does not provide a UI toggle for possible resources.
+Only confirmed MRs appear in CLI `get managed` output. The TUI can show actual objects from recognized MR and XR APIs even when object classification remains Possible; definitions themselves are never substituted for instances.
 
 Classification is necessarily conservative and depends on metadata, schema, and object data exposed by the cluster. Providers differ in generated schemas and metadata, and older or customized installations may omit useful signals. A legitimate MR can therefore remain Possible and be absent from the default list. Object-level promotion does not identify arbitrary non-MR schemas from annotations or conditions alone. Classification is not proof that a provider controller is installed or healthy. A resource classified as Not may still merit investigation if its provider uses nonstandard conventions; please report a sanitized fixture when encountering one.
 
@@ -37,5 +37,5 @@ Discovery diagnostics are produced by the same discovery path used for listing. 
 - Kubernetes API discovery and CRD reads are subject to the current user's RBAC permissions. Incomplete discovery can prevent classification or listing of some APIs.
 - API-level evidence can classify an installed resource family before any instances exist; object-level evidence may only be available when listing succeeds.
 - Custom provider CRDs may not use a Crossplane-named API group. Classification uses schema plus ownership, metadata/category, or v2 group-convention evidence; providers that omit these signals can remain Possible.
-- This release lists MRs and offers resource details. It does not yet provide XR relationship trees, YAML inspection, Events, or dedicated views for the other recognized families.
+- Relationship and TUI discovery constraints, including unresolved references and schema-backed VCD VM-to-vApp relationships, are documented in [architecture](architecture.md).
 - No provider-specific kind catalog is bundled, so newly installed provider APIs do not require an x9s update.

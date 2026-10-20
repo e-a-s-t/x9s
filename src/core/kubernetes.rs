@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use kube::{
@@ -14,6 +17,7 @@ use tracing::{debug, info, warn};
 use crate::core::{
     crossplane::{self, CrdInfo},
     models::{sort_resources, Classification, Resource, ResourceFamily},
+    relationships::{self, RelationshipGraph, TargetReference},
 };
 
 type DiscoveredVersion = std::result::Result<Vec<(ApiResource, ApiCapabilities)>, &'static str>;
@@ -46,8 +50,12 @@ pub struct DiscoveryReport {
     pub excluded_types: usize,
     pub managed_instance_count: usize,
     pub resources: Vec<Resource>,
+    /// Infrastructure instances, ProviderConfigs, and diagnostic system objects.
+    pub all_resources: Vec<Resource>,
+    pub graph: RelationshipGraph,
     pub classifications: Vec<TypeClassification>,
     pub errors: Vec<DiscoveryError>,
+    pub relationship_errors: Vec<DiscoveryError>,
 }
 
 impl DiscoveryReport {
@@ -60,6 +68,7 @@ impl DiscoveryReport {
 pub struct Kubernetes {
     client: Client,
     pub context: String,
+    discovery_cache: Arc<tokio::sync::Mutex<HashMap<String, DiscoveredVersion>>>,
 }
 
 impl Kubernetes {
@@ -80,6 +89,7 @@ impl Kubernetes {
         Ok(Self {
             client: Client::try_from(config).context("Could not initialize Kubernetes client")?,
             context,
+            discovery_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -118,13 +128,15 @@ impl Kubernetes {
         }
         let crd_count = crd_items.len();
         let mut resources = Vec::new();
+        let mut all_resources = Vec::new();
         let mut errors = Vec::new();
         let mut classifications = Vec::new();
         let mut confirmed_types = 0usize;
         let mut possible_types = 0usize;
         let mut excluded_types = 0usize;
         let mut listed_instances = 0usize;
-        let mut discovered_versions: HashMap<String, DiscoveredVersion> = HashMap::new();
+        let mut discovered_versions = self.discovery_cache.lock().await.clone();
+        discovered_versions.retain(|_, result| result.is_ok());
         info!(context = %self.context, crd_count, "loaded CRD definitions");
         for crd_object in crd_items {
             let crd_value = match serde_json::to_value(crd_object) {
@@ -165,11 +177,18 @@ impl Kubernetes {
                 }
                 Classification::NotManagedResource => {
                     excluded_types += 1;
-                    continue;
                 }
             }
-            if info.family != ResourceFamily::ManagedResource {
-                excluded_types += 1;
+            // Definitions are metadata, and unrelated APIs must not be listed as
+            // infrastructure. Their exact objects may still be fetched below when
+            // an infrastructure object authoritatively references them.
+            if !matches!(
+                info.family,
+                ResourceFamily::ManagedResource
+                    | ResourceFamily::CompositeResource
+                    | ResourceFamily::ProviderConfig
+            ) && !info.family.is_system()
+            {
                 continue;
             }
             let version = info.api_version.rsplit('/').next().unwrap_or("v1");
@@ -259,7 +278,12 @@ impl Kubernetes {
                         }
                         let page_resources = crossplane::normalize_objects(page_values, &info);
                         type_count += page_resources.len();
-                        listed_instances += page_resources.len();
+                        if matches!(
+                            info.family,
+                            ResourceFamily::ManagedResource | ResourceFamily::CompositeResource
+                        ) {
+                            listed_instances += page_resources.len();
+                        }
                         let possible_resources: Vec<_> = page_resources
                             .iter()
                             .filter(|resource| {
@@ -285,7 +309,12 @@ impl Kubernetes {
                                 "listed resources remain possible Managed Resources"
                             );
                         }
-                        resources.extend(page_resources);
+                        all_resources.extend(page_resources.iter().cloned());
+                        resources.extend(page_resources.into_iter().filter(|resource| {
+                            resource.family == ResourceFamily::ManagedResource
+                                && resource.classification
+                                    == Classification::ConfirmedManagedResource
+                        }));
                         let Some(token) = next else { break };
                         params.continue_token = Some(token);
                     }
@@ -318,20 +347,71 @@ impl Kubernetes {
                     plural = %info.plural,
                     scope = if info.namespaced { "Namespaced" } else { "Cluster" },
                     instance_count = type_count,
-                    "listed Managed Resource instances"
+                    family = info.family.label(),
+                    "listed CRD instances"
                 );
             }
         }
+        let relationship_sources: Vec<_> = all_resources
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource.family,
+                    ResourceFamily::ManagedResource | ResourceFamily::CompositeResource
+                )
+            })
+            .cloned()
+            .collect();
+        let (referenced_resources, reference_errors) = self
+            .fetch_authoritative_targets(&relationship_sources, &mut discovered_versions)
+            .await;
+        all_resources.extend(referenced_resources);
         sort_resources(&mut resources);
+        sort_resources(&mut all_resources);
         let mut resource_identities = std::collections::HashSet::new();
-        resources.retain(|resource| {
-            resource_identities.insert((
-                resource.group.clone(),
-                resource.kind.clone(),
-                resource.namespace.clone(),
-                resource.name.clone(),
-            ))
-        });
+        resources.retain(|resource| resource_identities.insert(resource.id()));
+        let mut graph_identities = std::collections::HashSet::new();
+        all_resources.retain(|resource| graph_identities.insert(resource.id()));
+        let graph = RelationshipGraph::build(&all_resources);
+        for provider_config in all_resources
+            .iter()
+            .filter(|resource| resource.family == ResourceFamily::ProviderConfig)
+        {
+            let provider_id = provider_config.id();
+            let associated: std::collections::HashSet<_> = all_resources
+                .iter()
+                .filter(|resource| resource.family == ResourceFamily::ManagedResource)
+                .filter(|resource| {
+                    graph.relationships.iter().any(|edge| {
+                        edge.relation == relationships::RelationshipType::ManagedBy
+                            && edge.from == resource.id()
+                            && edge.to.as_ref() == Some(&provider_id)
+                    })
+                })
+                .map(Resource::id)
+                .collect();
+            info!(
+                provider_group = %provider_config.group,
+                provider_kind = %provider_config.kind,
+                provider_namespace = provider_config.namespace.as_deref().unwrap_or(""),
+                provider_name = %provider_config.name,
+                unique_managed_resource_count = associated.len(),
+                "resolved ProviderConfig resource association summary"
+            );
+        }
+        let resolved_schema_relationships = graph
+            .relationships
+            .iter()
+            .filter(|edge| {
+                edge.relation == relationships::RelationshipType::BelongsTo && edge.to.is_some()
+            })
+            .count();
+        info!(
+            resolved_schema_relationships,
+            "resolved provider-schema relationship summary"
+        );
+        discovered_versions.retain(|_, result| result.is_ok());
+        *self.discovery_cache.lock().await = discovered_versions;
         classifications
             .sort_by(|a, b| (&a.group, &a.kind, &a.version).cmp(&(&b.group, &b.kind, &b.version)));
         errors.sort_by(|a, b| {
@@ -361,9 +441,151 @@ impl Kubernetes {
                 })
                 .count(),
             resources,
+            all_resources,
+            graph,
             classifications,
             errors,
+            relationship_errors: reference_errors,
         })
+    }
+
+    pub async fn list_events(&self, resource: &Resource) -> Result<Vec<Value>> {
+        let api_resource =
+            ApiResource::from_gvk_with_plural(&GroupVersionKind::gvk("", "v1", "Event"), "events");
+        let api: Api<DynamicObject> = match resource.namespace.as_deref() {
+            Some(namespace) => Api::namespaced_with(self.client.clone(), namespace, &api_resource),
+            None => Api::all_with(self.client.clone(), &api_resource),
+        };
+        let selector = if let Some(uid) = resource.uid.as_deref() {
+            format!("involvedObject.uid={uid}")
+        } else {
+            format!(
+                "involvedObject.name={},involvedObject.kind={}",
+                resource.name, resource.kind
+            )
+        };
+        let params = ListParams::default().fields(&selector);
+        let list = api
+            .list(&params)
+            .await
+            .context("Could not list Kubernetes Events; check Event list permissions")?;
+        list.items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Could not decode Kubernetes Events")
+    }
+
+    async fn fetch_authoritative_targets(
+        &self,
+        resources: &[Resource],
+        cache: &mut HashMap<String, DiscoveredVersion>,
+    ) -> (Vec<Resource>, Vec<DiscoveryError>) {
+        let mut fetched = Vec::new();
+        let mut errors = Vec::new();
+        let targets = relationships::authoritative_targets(resources);
+        for target in targets {
+            if resources.iter().any(|resource| {
+                resource.api_version == target.api_version
+                    && resource.kind == target.kind
+                    && resource.name == target.name
+                    && resource.namespace == target.namespace
+            }) {
+                continue;
+            }
+            let (group, version) = match target.api_version.split_once('/') {
+                Some((group, version)) => (group.to_owned(), version.to_owned()),
+                None => (String::new(), target.api_version.clone()),
+            };
+            let key = target.api_version.clone();
+            if !cache.contains_key(&key) {
+                let group_version = kube::core::GroupVersion::gv(&group, &version);
+                let discovered = pinned_group(&self.client, &group_version)
+                    .await
+                    .map(|group| group.versioned_resources(&version))
+                    .map_err(|error| kube_error_kind(&error));
+                cache.insert(key.clone(), discovered);
+            }
+            let discovered = cache
+                .get(&key)
+                .expect("reference discovery cache entry exists");
+            let version_resources = match discovered {
+                Ok(resources) => resources,
+                Err(code) => {
+                    errors.push(reference_error(code, &target));
+                    continue;
+                }
+            };
+            let Some((api_resource, capabilities)) =
+                version_resources.iter().find(|(resource, capabilities)| {
+                    resource.group == group
+                        && resource.version == version
+                        && resource.kind == target.kind
+                        && capabilities.supports_operation(verbs::GET)
+                })
+            else {
+                errors.push(reference_error("resource_not_discovered", &target));
+                continue;
+            };
+            let namespaced = matches!(capabilities.scope, Scope::Namespaced);
+            let api: Api<DynamicObject> = if namespaced {
+                let Some(namespace) = target.namespace.as_deref() else {
+                    errors.push(reference_error("namespace_required", &target));
+                    continue;
+                };
+                Api::namespaced_with(self.client.clone(), namespace, api_resource)
+            } else {
+                Api::all_with(self.client.clone(), api_resource)
+            };
+            match api.get(&target.name).await {
+                Ok(object) => match serde_json::to_value(object) {
+                    Ok(value) => {
+                        let info = CrdInfo {
+                            group: group.clone(),
+                            kind: target.kind.clone(),
+                            namespaced,
+                            schema: Value::Null,
+                            labels: Value::Null,
+                            annotations: Value::Null,
+                            owner_references: Value::Null,
+                            categories: Vec::new(),
+                            family: crossplane::family_for(&group, &target.kind),
+                            api_version: target.api_version.clone(),
+                            plural: api_resource.plural.clone(),
+                            provider_config_default_kind: None,
+                            vcd_vapp_name_reference: false,
+                        };
+                        fetched.push(crossplane::normalize(value, &info));
+                    }
+                    Err(_) => errors.push(reference_error("decode_error", &target)),
+                },
+                Err(error) => errors.push(reference_error(kube_error_kind(&error), &target)),
+            }
+        }
+        (fetched, errors)
+    }
+}
+
+fn reference_error(code: &str, target: &TargetReference) -> DiscoveryError {
+    DiscoveryError {
+        code: code.to_owned(),
+        message: format!(
+            "Could not resolve referenced resource {}/{}",
+            target.kind, target.name
+        ),
+        group: target
+            .api_version
+            .split_once('/')
+            .map(|(group, _)| group.to_owned()),
+        version: Some(
+            target
+                .api_version
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        ),
+        kind: Some(target.kind.clone()),
     }
 }
 
@@ -441,6 +663,11 @@ pub(crate) fn parse_crd(value: &Value) -> Option<CrdInfo> {
         .pointer("/schema/openAPIV3Schema")
         .cloned()
         .unwrap_or(Value::Null);
+    let provider_config_default_kind = schema
+        .pointer("/properties/spec/properties/providerConfigRef/default/kind")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let vcd_vapp_name_reference = relationships::vcd_vapp_name_reference(&group, &kind, &schema);
     let mut crd = CrdInfo {
         group: group.clone(),
         kind,
@@ -466,6 +693,8 @@ pub(crate) fn parse_crd(value: &Value) -> Option<CrdInfo> {
         family: ResourceFamily::Other,
         api_version: format!("{group}/{version_name}"),
         plural,
+        provider_config_default_kind,
+        vcd_vapp_name_reference,
     };
     crd.family = crossplane::family_for_crd(&crd);
     Some(crd)
@@ -483,6 +712,49 @@ mod tests {
         assert!(crd.namespaced);
         assert_eq!(crd.api_version, "s3.aws.m.upbound.io/v1beta1");
         assert_eq!(crd.family, ResourceFamily::ManagedResource);
+    }
+
+    #[test]
+    fn parses_vcd_v2_provider_config_default_and_schema_relationship() {
+        let value = json!({
+            "metadata": {"name":"vms.vapp.vcd.m.carekube.com", "ownerReferences":[
+                {"apiVersion":"pkg.crossplane.io/v1","kind":"ProviderRevision","uid":"rev-1"}
+            ]},
+            "spec": {
+                "group":"vapp.vcd.m.carekube.com", "scope":"Namespaced",
+                "names":{"kind":"VM","plural":"vms","categories":["crossplane","managed","vcd"]},
+                "versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{
+                    "spec":{"properties":{
+                        "providerConfigRef":{"default":{"kind":"ClusterProviderConfig","name":"default"}},
+                        "forProvider":{"properties":{"vappName":{"type":"string","description":"The vApp this VM belongs to."}}}
+                    }},
+                    "status":{"properties":{"atProvider":{}}}
+                }}}}]
+            }
+        });
+        let crd = parse_crd(&value).unwrap();
+        assert_eq!(crd.family, ResourceFamily::ManagedResource);
+        assert_eq!(
+            crd.provider_config_default_kind.as_deref(),
+            Some("ClusterProviderConfig")
+        );
+        assert!(crd.vcd_vapp_name_reference);
+    }
+
+    #[test]
+    fn crossplane_definitions_and_internals_are_diagnostic_system_types() {
+        for (group, kind) in [
+            ("apiextensions.crossplane.io", "ManagedResourceDefinition"),
+            ("pkg.crossplane.io", "ProviderRevision"),
+            ("pkg.crossplane.io", "DeploymentRuntimeConfig"),
+        ] {
+            let value = json!({
+                "metadata":{"name":format!("{}.example.org", kind.to_lowercase())},
+                "spec":{"group":group,"scope":"Cluster","names":{"kind":kind,"plural":"objects","categories":["crossplane"]},
+                    "versions":[{"name":"v1","served":true,"schema":{"openAPIV3Schema":{"type":"object"}}}]}
+            });
+            assert!(parse_crd(&value).unwrap().family.is_system());
+        }
     }
 
     #[test]

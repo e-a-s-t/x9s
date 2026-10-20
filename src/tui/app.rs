@@ -1,47 +1,382 @@
-use crate::core::models::Resource;
+use std::collections::HashSet;
+
+use crate::core::{
+    models::{Resource, ResourceFamily, ResourceId},
+    relationships::{RelationshipGraph, RelationshipType},
+};
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum View {
-    List,
+    Providers,
+    Resources,
+    System,
     Details,
+    Yaml,
+    Events,
+    Describe,
+    Help,
+}
+
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    pub view: View,
+    pub selected: usize,
+    pub related_selected: usize,
+    pub provider: Option<ResourceId>,
+    pub unassigned_only: bool,
+    pub unresolved_only: bool,
+    pub filter: String,
+    pub tree: bool,
+    pub collapsed: HashSet<ResourceId>,
+    pub health_only: bool,
+    pub detail_scroll: u16,
 }
 
 pub struct App {
     pub resources: Vec<Resource>,
+    pub graph: RelationshipGraph,
+    pub providers: Vec<ResourceId>,
     pub selected: usize,
+    pub related_selected: usize,
+    pub selected_provider: Option<ResourceId>,
+    pub unassigned_only: bool,
+    pub unresolved_only: bool,
     pub filter: String,
-    pub filtering: bool,
+    pub input: String,
+    pub input_mode: InputMode,
     pub view: View,
+    pub tree: bool,
+    pub collapsed: HashSet<ResourceId>,
+    pub health_only: bool,
+    pub detail_scroll: u16,
+    pub history: Vec<HistoryEntry>,
     pub loading: bool,
     pub error: Option<String>,
     pub warnings: Vec<String>,
+    pub events: Vec<Value>,
     pub context: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputMode {
+    None,
+    Filter,
+    Command,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderEntry {
+    All,
+    Unassigned,
+    Unresolved,
+    Config(ResourceId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TreeRow {
+    pub index: usize,
+    pub depth: usize,
+    pub last: bool,
+    pub has_children: bool,
+}
+
 impl App {
+    pub fn new(context: String) -> Self {
+        Self {
+            resources: Vec::new(),
+            graph: RelationshipGraph::default(),
+            providers: Vec::new(),
+            selected: 0,
+            related_selected: 0,
+            selected_provider: None,
+            unassigned_only: false,
+            unresolved_only: false,
+            filter: String::new(),
+            input: String::new(),
+            input_mode: InputMode::None,
+            view: View::Providers,
+            tree: true,
+            collapsed: HashSet::new(),
+            health_only: false,
+            detail_scroll: 0,
+            history: Vec::new(),
+            loading: true,
+            error: None,
+            warnings: Vec::new(),
+            events: Vec::new(),
+            context,
+        }
+    }
+
+    pub fn replace_resources(
+        &mut self,
+        resources: Vec<Resource>,
+        graph: RelationshipGraph,
+        warnings: Vec<String>,
+    ) {
+        let old_selected = (self.view != View::Providers)
+            .then(|| self.selected_resource().map(Resource::id))
+            .flatten();
+        let old_provider_selected = (self.view == View::Providers)
+            .then(|| self.visible_provider_entries().get(self.selected).cloned())
+            .flatten();
+        self.resources = resources;
+        self.graph = graph;
+        self.providers = self
+            .resources
+            .iter()
+            .filter(|resource| resource.family == ResourceFamily::ProviderConfig)
+            .map(Resource::id)
+            .collect();
+        self.providers.sort_by(|left, right| {
+            (&left.group, &left.kind, &left.namespace, &left.name).cmp(&(
+                &right.group,
+                &right.kind,
+                &right.namespace,
+                &right.name,
+            ))
+        });
+        if self
+            .selected_provider
+            .as_ref()
+            .is_some_and(|provider| !self.providers.contains(provider))
+        {
+            self.selected_provider = None;
+            self.unassigned_only = true;
+        }
+        self.warnings = warnings;
+        if self.view == View::Providers {
+            if let Some(old_provider_selected) = old_provider_selected {
+                self.selected = self
+                    .visible_provider_entries()
+                    .iter()
+                    .position(|entry| entry == &old_provider_selected)
+                    .unwrap_or(0);
+            } else {
+                self.selected = self.selected.min(self.current_len().saturating_sub(1));
+            }
+        } else if let Some(old_selected) = old_selected {
+            let indices = self.visible_indices();
+            if let Some(position) = indices
+                .iter()
+                .position(|index| self.resources[*index].id() == old_selected)
+            {
+                self.selected = position;
+            } else {
+                self.view = View::Resources;
+                self.selected = self.selected.min(indices.len().saturating_sub(1));
+            }
+        } else {
+            self.selected = self.selected.min(self.current_len().saturating_sub(1));
+        }
+    }
+
     pub fn visible_indices(&self) -> Vec<usize> {
+        self.visible_tree_rows()
+            .into_iter()
+            .map(|row| row.index)
+            .collect()
+    }
+
+    pub fn visible_tree_rows(&self) -> Vec<TreeRow> {
         let needle = self.filter.to_lowercase();
-        self.resources
+        let mut included: HashSet<ResourceId> = self
+            .resources
+            .iter()
+            .filter(|resource| {
+                let system_view = self.view == View::System;
+                if system_view != resource.family.is_system()
+                    || (!system_view && resource.family == ResourceFamily::ProviderConfig)
+                {
+                    return false;
+                }
+                let is_managed = resource.family == ResourceFamily::ManagedResource;
+                let edges = self.graph.relationships.iter().filter(|edge| {
+                    edge.relation == RelationshipType::ManagedBy && edge.from == resource.id()
+                });
+                let belongs = if system_view {
+                    true
+                } else if let Some(provider) = &self.selected_provider {
+                    is_managed && edges.clone().any(|edge| edge.to.as_ref() == Some(provider))
+                } else if self.unresolved_only {
+                    is_managed && edges.clone().any(|edge| edge.to.is_none())
+                } else if self.unassigned_only {
+                    is_managed
+                        && resource
+                            .original
+                            .pointer("/spec/providerConfigRef")
+                            .is_none()
+                } else {
+                    true
+                };
+                let unhealthy = matches!(
+                    resource.ready.status,
+                    crate::core::ConditionStatus::False | crate::core::ConditionStatus::Unknown
+                ) || matches!(
+                    resource.synced.status,
+                    crate::core::ConditionStatus::False | crate::core::ConditionStatus::Unknown
+                );
+                belongs
+                    && (!self.health_only || unhealthy)
+                    && (needle.is_empty()
+                        || resource.name.to_lowercase().contains(&needle)
+                        || resource.kind.to_lowercase().contains(&needle)
+                        || resource.group.to_lowercase().contains(&needle)
+                        || resource
+                            .namespace
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&needle)
+                        || resource
+                            .ready
+                            .status
+                            .label()
+                            .to_lowercase()
+                            .contains(&needle))
+            })
+            .map(Resource::id)
+            .collect();
+
+        let mut edges = self.tree_edges();
+        if self.tree {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for (parent, child) in &edges {
+                    if included.contains(child) && included.insert(parent.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        edges.retain(|(parent, child)| included.contains(parent) && included.contains(child));
+        let mut rows = Vec::new();
+        if !self.tree {
+            return self
+                .resources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, resource)| {
+                    included.contains(&resource.id()).then_some(TreeRow {
+                        index,
+                        depth: 0,
+                        last: true,
+                        has_children: false,
+                    })
+                })
+                .collect();
+        }
+        let roots: Vec<_> = self
+            .resources
             .iter()
             .enumerate()
-            .filter_map(|(index, resource)| {
-                if resource.classification
-                    != crate::core::models::Classification::ConfirmedManagedResource
-                {
-                    return None;
+            .filter(|(_, resource)| {
+                let id = resource.id();
+                included.contains(&id) && !edges.iter().any(|(_, child)| child == &id)
+            })
+            .map(|(index, resource)| (index, resource.id()))
+            .collect();
+        for (index, id) in roots {
+            self.append_tree(
+                &id,
+                TreeRow {
+                    index,
+                    depth: 0,
+                    last: true,
+                    has_children: false,
+                },
+                &included,
+                &edges,
+                &mut HashSet::new(),
+                &mut rows,
+            );
+        }
+        // Render cyclic components once after rooted components.
+        for (index, resource) in self.resources.iter().enumerate() {
+            let id = resource.id();
+            if included.contains(&id) && !rows.iter().any(|row| row.index == index) {
+                self.append_tree(
+                    &id,
+                    TreeRow {
+                        index,
+                        depth: 0,
+                        last: true,
+                        has_children: false,
+                    },
+                    &included,
+                    &edges,
+                    &mut HashSet::new(),
+                    &mut rows,
+                );
+            }
+        }
+        rows
+    }
+
+    fn tree_edges(&self) -> Vec<(ResourceId, ResourceId)> {
+        self.graph
+            .relationships
+            .iter()
+            .filter_map(|edge| match edge.relation {
+                RelationshipType::Composes | RelationshipType::Owns => {
+                    edge.to.clone().map(|child| (edge.from.clone(), child))
                 }
-                let matches = needle.is_empty()
-                    || resource.name.to_lowercase().contains(&needle)
-                    || resource.kind.to_lowercase().contains(&needle)
-                    || resource
-                        .namespace
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&needle);
-                matches.then_some(index)
+                RelationshipType::BelongsTo => {
+                    edge.to.clone().map(|parent| (parent, edge.from.clone()))
+                }
+                _ => None,
             })
             .collect()
+    }
+
+    fn append_tree(
+        &self,
+        id: &ResourceId,
+        row: TreeRow,
+        included: &HashSet<ResourceId>,
+        edges: &[(ResourceId, ResourceId)],
+        path: &mut HashSet<ResourceId>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        if !path.insert(id.clone()) {
+            return;
+        }
+        let mut children: Vec<_> = edges
+            .iter()
+            .filter(|(parent, child)| parent == id && included.contains(child))
+            .map(|(_, child)| child.clone())
+            .collect();
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        rows.push(TreeRow {
+            has_children: !children.is_empty(),
+            ..row
+        });
+        if !self.collapsed.contains(id) || !self.filter.is_empty() {
+            for (position, child) in children.iter().enumerate() {
+                if let Some(child_index) = self
+                    .resources
+                    .iter()
+                    .position(|resource| resource.id() == *child)
+                {
+                    self.append_tree(
+                        child,
+                        TreeRow {
+                            index: child_index,
+                            depth: row.depth + 1,
+                            last: position + 1 == children.len(),
+                            has_children: false,
+                        },
+                        included,
+                        edges,
+                        path,
+                        rows,
+                    );
+                }
+            }
+        }
+        path.remove(id);
     }
 
     pub fn selected_resource(&self) -> Option<&Resource> {
@@ -50,121 +385,305 @@ impl App {
             .and_then(|index| self.resources.get(*index))
     }
 
-    pub fn replace_resources(&mut self, resources: Vec<Resource>, warnings: Vec<String>) {
-        let old_identity = self.selected_resource().map(|r| {
-            (
-                r.api_version.clone(),
-                r.kind.clone(),
-                r.namespace.clone(),
-                r.name.clone(),
-            )
+    pub fn related_resource_ids(&self) -> Vec<ResourceId> {
+        let Some(resource) = self.selected_resource() else {
+            return Vec::new();
+        };
+        let id = resource.id();
+        let mut ids: Vec<_> = self
+            .graph
+            .relationships
+            .iter()
+            .filter_map(|edge| {
+                if edge.from == id {
+                    edge.to.clone()
+                } else if edge.to.as_ref() == Some(&id) {
+                    Some(edge.from.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ids.sort_by(|left, right| {
+            (&left.group, &left.kind, &left.namespace, &left.name).cmp(&(
+                &right.group,
+                &right.kind,
+                &right.namespace,
+                &right.name,
+            ))
         });
-        self.resources = resources;
-        self.warnings = warnings;
-        let visible = self.visible_indices();
-        self.selected = old_identity
-            .and_then(|identity| {
-                visible.iter().position(|index| {
-                    let r = &self.resources[*index];
-                    (
-                        r.api_version.clone(),
-                        r.kind.clone(),
-                        r.namespace.clone(),
-                        r.name.clone(),
-                    ) == identity
+        ids.dedup();
+        ids
+    }
+
+    pub fn current_len(&self) -> usize {
+        if self.view == View::Providers {
+            self.visible_provider_entries().len()
+        } else {
+            self.visible_indices().len()
+        }
+    }
+
+    pub fn visible_provider_entries(&self) -> Vec<ProviderEntry> {
+        let needle = self.filter.to_lowercase();
+        let mut entries = Vec::new();
+        if needle.is_empty() || "all providers".contains(&needle) {
+            entries.push(ProviderEntry::All);
+        }
+        if needle.is_empty() || "unassigned".contains(&needle) {
+            entries.push(ProviderEntry::Unassigned);
+        }
+        if needle.is_empty() || "unresolved providerconfig".contains(&needle) {
+            entries.push(ProviderEntry::Unresolved);
+        }
+        entries.extend(self.providers.iter().filter_map(|id| {
+            let matches = self
+                .resources
+                .iter()
+                .find(|resource| resource.id() == *id)
+                .is_some_and(|resource| {
+                    resource.name.to_lowercase().contains(&needle)
+                        || resource.kind.to_lowercase().contains(&needle)
+                        || resource.group.to_lowercase().contains(&needle)
+                        || resource
+                            .ready
+                            .status
+                            .label()
+                            .to_lowercase()
+                            .contains(&needle)
+                });
+            matches.then(|| ProviderEntry::Config(id.clone()))
+        }));
+        entries
+    }
+
+    pub fn provider_resource_count(&self, provider: &ResourceId) -> usize {
+        let identities: HashSet<_> = self
+            .resources
+            .iter()
+            .filter(|resource| resource.family == ResourceFamily::ManagedResource)
+            .map(Resource::id)
+            .collect();
+        identities
+            .into_iter()
+            .filter(|id| {
+                self.graph.relationships.iter().any(|edge| {
+                    edge.relation == RelationshipType::ManagedBy
+                        && edge.from == *id
+                        && edge.to.as_ref() == Some(provider)
                 })
             })
-            .unwrap_or_else(|| self.selected.min(visible.len().saturating_sub(1)));
+            .count()
     }
 
     pub fn move_selection(&mut self, amount: isize) {
-        let len = self.visible_indices().len();
+        let len = self.current_len();
         if len == 0 {
             self.selected = 0;
             return;
         }
         self.selected = (self.selected as isize + amount).clamp(0, len as isize - 1) as usize;
     }
+
+    pub fn push_history(&mut self) {
+        self.history.push(HistoryEntry {
+            view: self.view,
+            selected: self.selected,
+            related_selected: self.related_selected,
+            provider: self.selected_provider.clone(),
+            unassigned_only: self.unassigned_only,
+            unresolved_only: self.unresolved_only,
+            filter: self.filter.clone(),
+            tree: self.tree,
+            collapsed: self.collapsed.clone(),
+            health_only: self.health_only,
+            detail_scroll: self.detail_scroll,
+        });
+    }
+
+    pub fn back(&mut self) {
+        if let Some(entry) = self.history.pop() {
+            self.view = entry.view;
+            self.selected = entry.selected;
+            self.related_selected = entry.related_selected;
+            self.selected_provider = entry.provider;
+            self.unassigned_only = entry.unassigned_only;
+            self.unresolved_only = entry.unresolved_only;
+            self.filter = entry.filter;
+            self.tree = entry.tree;
+            self.collapsed = entry.collapsed;
+            self.health_only = entry.health_only;
+            self.detail_scroll = entry.detail_scroll;
+        } else if self.view != View::Providers {
+            self.view = View::Providers;
+            self.selected = 0;
+            self.selected_provider = None;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::crossplane::normalize,
-        core::models::{sort_resources, ResourceFamily},
+    use crate::core::{
+        crossplane::{normalize, CrdInfo},
+        models::sort_resources,
     };
     use serde_json::json;
 
-    fn resource(name: &str, namespace: Option<&str>) -> Resource {
-        let crd = crate::core::crossplane::CrdInfo {
-            group: "s3.aws.m.upbound.io".into(),
-            kind: "Bucket".into(),
-            namespaced: namespace.is_some(),
-            schema: json!({"properties":{"spec":{"properties":{"forProvider":{}}},"status":{"properties":{"atProvider":{}}}}}),
+    fn resource(name: &str) -> Resource {
+        let crd = CrdInfo {
+            group: "infra.example.org".into(),
+            kind: "Machine".into(),
+            namespaced: false,
+            schema: json!({}),
             labels: json!({}),
             annotations: json!({}),
             owner_references: json!([]),
             categories: vec![],
             family: ResourceFamily::ManagedResource,
-            api_version: "s3.aws.m.upbound.io/v1".into(),
-            plural: "buckets".into(),
+            api_version: "infra.example.org/v1".into(),
+            plural: "machines".into(),
+            provider_config_default_kind: None,
+            vcd_vapp_name_reference: false,
         };
-        let mut value = json!({"apiVersion":"s3.aws.m.upbound.io/v1","kind":"Bucket","metadata":{"name":name},"spec":{"forProvider":{}},"status":{"conditions":[{"type":"Ready","status":"True"}]}});
-        if let Some(namespace) = namespace {
-            value["metadata"]["namespace"] = json!(namespace);
-        }
-        normalize(value, &crd)
-    }
-
-    fn app() -> App {
-        App {
-            resources: vec![
-                resource("alpha", Some("team-a")),
-                resource("beta", Some("team-b")),
-            ],
-            selected: 0,
-            filter: String::new(),
-            filtering: false,
-            view: View::List,
-            loading: false,
-            error: None,
-            warnings: vec![],
-            context: "test".into(),
-        }
+        normalize(
+            json!({"apiVersion":"infra.example.org/v1","kind":"Machine","metadata":{"name":name}}),
+            &crd,
+        )
     }
 
     #[test]
-    fn filtering_matches_name_kind_namespace_without_case() {
-        let mut app = app();
-        app.filter = "TEAM-B".into();
-        assert_eq!(app.visible_indices(), vec![1]);
-        app.filter = "buc".into();
-        assert_eq!(app.visible_indices(), vec![0, 1]);
-    }
-
-    #[test]
-    fn sorting_and_selection_preservation_are_stable() {
-        let mut app = app();
+    fn filter_and_selection_survive_refresh_by_identity() {
+        let mut app = App::new("test".into());
+        app.view = View::Resources;
+        let mut alpha = resource("alpha");
+        alpha.family = ResourceFamily::ManagedResource;
+        let mut beta = resource("beta");
+        beta.family = ResourceFamily::ManagedResource;
+        app.resources = vec![alpha, beta];
         app.selected = 1;
-        let selected_name = app.selected_resource().unwrap().name.clone();
-        let mut reordered = vec![
-            resource("beta", Some("team-b")),
-            resource("aardvark", Some("team-a")),
-            resource("alpha", Some("team-a")),
-        ];
-        sort_resources(&mut reordered);
+        let mut refreshed = vec![resource("beta"), resource("alpha"), resource("gamma")];
+        sort_resources(&mut refreshed);
+        app.replace_resources(refreshed, RelationshipGraph::default(), vec![]);
+        assert_eq!(app.selected_resource().unwrap().name, "beta");
+        app.filter = "GAMMA".into();
+        assert_eq!(app.visible_indices().len(), 1);
+        assert_eq!(app.resources[app.visible_indices()[0]].name, "gamma");
+    }
+
+    #[test]
+    fn navigation_history_restores_view_filter_and_tree_mode() {
+        let mut app = App::new("test".into());
+        app.view = View::Resources;
+        app.filter = "alpha".into();
+        app.tree = false;
+        app.push_history();
+        app.view = View::Details;
+        app.filter.clear();
+        app.tree = true;
+        app.back();
+        assert_eq!(app.view, View::Resources);
+        assert_eq!(app.filter, "alpha");
+        assert!(!app.tree);
+    }
+
+    #[test]
+    fn provider_selector_keeps_unassigned_resources_separately_browsable() {
+        let mut app = App::new("test".into());
+        app.view = View::Providers;
+        app.resources = vec![resource("alpha"), resource("beta")];
         assert_eq!(
-            reordered
-                .iter()
-                .map(|resource| resource.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["aardvark", "alpha", "beta"]
+            app.visible_provider_entries(),
+            vec![
+                ProviderEntry::All,
+                ProviderEntry::Unassigned,
+                ProviderEntry::Unresolved
+            ]
         );
-        app.replace_resources(reordered, vec![]);
-        assert_eq!(app.selected_resource().unwrap().name, selected_name);
-        assert_eq!(app.selected, 2);
-        app.move_selection(99);
-        assert_eq!(app.selected, 2);
+        app.view = View::Resources;
+        app.unassigned_only = true;
+        assert_eq!(app.visible_indices().len(), 2);
+    }
+
+    #[test]
+    fn unresolved_resources_remain_visible_in_all_and_have_a_separate_filter() {
+        let mut item = resource("orphan");
+        item.family = ResourceFamily::ManagedResource;
+        item.original["spec"]["providerConfigRef"] = json!({"name":"missing"});
+        let graph = RelationshipGraph::build(std::slice::from_ref(&item));
+        let mut app = App::new("test".into());
+        app.view = View::Resources;
+        app.resources = vec![item];
+        app.graph = graph;
+        assert_eq!(app.visible_indices().len(), 1);
+        app.unresolved_only = true;
+        assert_eq!(app.visible_indices().len(), 1);
+        app.unresolved_only = false;
+        app.unassigned_only = true;
+        assert!(app.visible_indices().is_empty());
+    }
+
+    #[test]
+    fn provider_counts_unique_instances_not_graph_edges() {
+        let mut managed = resource("node");
+        managed.family = ResourceFamily::ManagedResource;
+        let mut config = resource("default");
+        config.family = ResourceFamily::ProviderConfig;
+        let managed_id = managed.id();
+        let config_id = config.id();
+        let edge = crate::core::relationships::Relationship {
+            from: managed_id.clone(),
+            to: Some(config_id.clone()),
+            relation: RelationshipType::ManagedBy,
+            unresolved: None,
+        };
+        let mut app = App::new("test".into());
+        app.resources = vec![managed.clone(), managed, config];
+        app.graph.relationships = vec![edge.clone(), edge];
+        assert_eq!(app.provider_resource_count(&config_id), 1);
+    }
+
+    #[test]
+    fn known_inverse_relationship_renders_as_tree_parent_and_child() {
+        let mut parent = resource("seed");
+        parent.kind = "Vapp".into();
+        let mut child = resource("seed-cp01");
+        child.kind = "VM".into();
+        let parent_id = parent.id();
+        let child_id = child.id();
+        let mut app = App::new("test".into());
+        app.view = View::Resources;
+        app.resources = vec![child, parent];
+        app.graph
+            .relationships
+            .push(crate::core::relationships::Relationship {
+                from: child_id,
+                to: Some(parent_id),
+                relation: RelationshipType::BelongsTo,
+                unresolved: None,
+            });
+        let rows = app.visible_tree_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].depth, 0);
+        assert_eq!(app.resources[rows[0].index].kind, "Vapp");
+        assert!(rows[0].has_children);
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(app.resources[rows[1].index].kind, "VM");
+        assert!(rows[1].last);
+    }
+
+    #[test]
+    fn system_objects_are_hidden_from_infrastructure_and_available_separately() {
+        let mut definition = resource("bucket.mrd");
+        definition.family = ResourceFamily::System;
+        let mut revision = resource("provider-revision");
+        revision.family = ResourceFamily::ProviderRevision;
+        let mut app = App::new("test".into());
+        app.view = View::Resources;
+        app.resources = vec![definition, revision];
+        assert!(app.visible_indices().is_empty());
+        app.view = View::System;
+        assert_eq!(app.visible_indices().len(), 2);
     }
 }

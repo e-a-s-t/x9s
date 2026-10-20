@@ -123,6 +123,8 @@ mod tests {
             name: "sample".into(),
             namespace: namespace.map(str::to_owned),
             uid: None,
+            provider_owner_uid: None,
+            provider_config_default_kind: None,
             created_at: None,
             external_name: None,
             synced: Condition {
@@ -138,6 +140,7 @@ mod tests {
                 last_transition_time: None,
             },
             family: ResourceFamily::ManagedResource,
+            vcd_vapp_name_reference: false,
             classification: Classification::ConfirmedManagedResource,
             original: Value::Null,
         }

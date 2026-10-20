@@ -16,6 +16,8 @@ pub struct CrdInfo {
     pub family: ResourceFamily,
     pub api_version: String,
     pub plural: String,
+    pub provider_config_default_kind: Option<String>,
+    pub vcd_vapp_name_reference: bool,
 }
 
 pub fn family_for(group: &str, kind: &str) -> ResourceFamily {
@@ -32,6 +34,7 @@ pub fn family_for(group: &str, kind: &str) -> ResourceFamily {
         ("pkg.crossplane.io", "Function") => ResourceFamily::Function,
         ("pkg.crossplane.io", "FunctionRevision") => ResourceFamily::FunctionRevision,
         (_, "ProviderConfig" | "ClusterProviderConfig") => ResourceFamily::ProviderConfig,
+        ("apiextensions.crossplane.io", "ManagedResourceDefinition") => ResourceFamily::System,
         _ => ResourceFamily::Other,
     }
 }
@@ -119,6 +122,13 @@ pub fn family_for_crd(crd: &CrdInfo) -> ResourceFamily {
         ResourceFamily::CompositeResource
     } else if schema_has_for_provider(crd) {
         ResourceFamily::ManagedResource
+    } else if crd
+        .categories
+        .iter()
+        .any(|category| category == "crossplane")
+        || crd.group.ends_with(".crossplane.io")
+    {
+        ResourceFamily::System
     } else {
         ResourceFamily::Other
     }
@@ -318,6 +328,24 @@ pub fn normalize(value: Value, crd: &CrdInfo) -> Resource {
         .pointer("/annotations/crossplane.io~1external-name")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let provider_owner_uid = crd
+        .owner_references
+        .as_array()
+        .and_then(|owners| {
+            owners.iter().find(|owner| {
+                owner
+                    .get("apiVersion")
+                    .and_then(Value::as_str)
+                    .is_some_and(|api| api.starts_with("pkg.crossplane.io/"))
+                    && matches!(
+                        owner.get("kind").and_then(Value::as_str),
+                        Some("Provider" | "ProviderRevision")
+                    )
+            })
+        })
+        .and_then(|owner| owner.get("uid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let synced = get_condition("Synced");
     let ready = get_condition("Ready");
     let classification = classify_object(crd, &value);
@@ -353,11 +381,14 @@ pub fn normalize(value: Value, crd: &CrdInfo) -> Resource {
             .get("uid")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        provider_owner_uid,
+        provider_config_default_kind: crd.provider_config_default_kind.clone(),
         created_at,
         external_name,
         synced,
         ready,
         family: crd.family.clone(),
+        vcd_vapp_name_reference: crd.vcd_vapp_name_reference,
         classification,
         original: value,
     }
@@ -427,6 +458,8 @@ mod tests {
             family: ResourceFamily::ManagedResource,
             api_version: format!("{group}/v1beta1"),
             plural: "buckets".into(),
+            provider_config_default_kind: None,
+            vcd_vapp_name_reference: false,
         }
     }
 
