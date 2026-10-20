@@ -1,0 +1,8 @@
+[package]
+name = "x9s"
+version = "0.1.0"
+edition = "2021"
+description = "Crossplane-aware terminal resource explorer (starter scaffold)"
+license = "Apache-2.0"
+
+# Dependencies will be introduced with the first implementation task.
