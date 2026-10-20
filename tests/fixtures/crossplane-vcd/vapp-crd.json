@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "vapps.vcd.vcd.carekube.com",
+    "ownerReferences": [
+      { "apiVersion": "apiextensions.crossplane.io/v1alpha1", "kind": "ManagedResourceDefinition", "name": "vapps.vcd.vcd.carekube.com" },
+      { "apiVersion": "pkg.crossplane.io/v1", "kind": "ProviderRevision", "name": "provider-vcd" }
+    ]
+  },
+  "spec": {
+    "group": "vcd.vcd.carekube.com",
+    "scope": "Cluster",
+    "names": { "kind": "Vapp", "plural": "vapps", "categories": ["crossplane", "managed", "vcd"] },
+    "versions": [{ "name": "v1alpha1", "served": true, "schema": { "openAPIV3Schema": { "properties": {
+      "spec": { "properties": { "forProvider": { "type": "object" }, "providerConfigRef": { "type": "object" } } },
+      "status": { "properties": { "atProvider": { "type": "object" }, "conditions": { "type": "array" } } }
+    } } } }]
+  }
+}

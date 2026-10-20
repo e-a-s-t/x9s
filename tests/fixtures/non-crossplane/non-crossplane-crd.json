@@ -1,0 +1,12 @@
+{
+  "metadata": { "name": "widgets.example.org" },
+  "spec": {
+    "group": "example.org",
+    "scope": "Namespaced",
+    "names": { "kind": "Widget", "plural": "widgets" },
+    "versions": [{ "name": "v1", "served": true, "schema": { "openAPIV3Schema": { "properties": {
+      "spec": { "properties": { "configuration": { "type": "object" } } },
+      "status": { "properties": { "phase": { "type": "string" } } }
+    } } } }]
+  }
+}

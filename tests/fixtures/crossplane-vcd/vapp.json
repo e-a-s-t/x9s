@@ -1,0 +1,10 @@
+{
+  "apiVersion": "vcd.vcd.carekube.com/v1alpha1",
+  "kind": "Vapp",
+  "metadata": { "name": "seed", "creationTimestamp": "2026-10-20T07:30:05Z", "annotations": { "crossplane.io/external-name": "seed" } },
+  "spec": { "forProvider": {}, "providerConfigRef": { "name": "default" } },
+  "status": { "atProvider": {}, "conditions": [
+    { "type": "Synced", "status": "True", "reason": "ReconcileSuccess" },
+    { "type": "Ready", "status": "True", "reason": "Available" }
+  ] }
+}

@@ -1,41 +1,42 @@
 # Architecture
 
-**Status: proposed design; not yet implemented.**
+**Status: Phase 1 implementation.**
 
 ## Development environment
 
-Development tooling is managed separately from runtime architecture. Devbox pins the Rust toolchain and utilities, while Cargo manages application dependencies and package metadata. `Cargo.toml` is the version source of truth; see [development](development.md) for environment and version commands.
+Devbox pins the Rust toolchain and development utilities. Cargo manages application dependencies and package metadata; `Cargo.toml` is the version source of truth. See [development](development.md).
 
 ## Layers
 
-1. **Kubernetes adapter:** kube-rs client, API discovery, list/watch, error handling; uses kubeconfig and API server permissions.
-2. **Crossplane interpretation:** classify discovered resources, parse conditions, extract explicit references and relationships.
-3. **Domain model:** resource identity (G/V/K, scope, namespace, name, UID), conditions, metadata, and related objects.
-4. **Terminal UI:** Ratatui navigation, filtering, tables, details, YAML and events, with Crossterm handling terminal input and events.
+1. **Kubernetes adapter:** initializes kube-rs from the current kubeconfig context, discovers served APIs and their scopes, and lists dynamic resources asynchronously.
+2. **Crossplane interpretation:** classifies discovered resource families and Managed Resource candidates, interprets conditions, and extracts Crossplane metadata.
+3. **Resource model:** normalizes API version, kind, name, scope, UID, creation time, external name, conditions, and the original Kubernetes object.
+4. **Terminal UI:** manages list, filter, details, loading, and error state; Ratatui renders the views and Crossterm supplies terminal input and events.
 
-Ratatui is the required TUI framework. Follow its application conventions: keep application state separate from rendering, use widgets and layouts for views, and render through a terminal draw loop. Crossterm provides terminal input and event handling. Keep Kubernetes communication and Crossplane interpretation outside UI components.
-
-Tokio tasks must keep Kubernetes requests off the UI rendering path so terminal input and redraws remain responsive. Send results back to the application through bounded asynchronous updates and cancel obsolete work when changing views or contexts. Never assume that every resource has `status.conditions`.
+The UI does not issue Kubernetes requests. Async operations deliver results to application state so rendering and keyboard input remain responsive. Malformed or absent conditions are handled as unknown/missing, not as success.
 
 ## Discovery and scope
 
-Discover installed API resources dynamically. Classify with reliable Crossplane signals and documented API metadata; avoid a hardcoded list of provider kinds. A provider's CRDs can be installed without its controller being healthy. Respect namespace and cluster scopes and show partial results when RBAC denies some resources.
+Discovery uses installed Kubernetes API and CRD information rather than provider-specific kind lists. For each confirmed or possible Managed Resource CRD, the adapter resolves group, served version, kind, plural, LIST capability, and scope against Kubernetes API discovery. It uses kube-rs `pinned_group` discovery for each CRD group/version and caches that result for subsequent CRDs in the same version. A discovery failure is recorded for that group/version and skipped while other groups and versions continue. Matching resources use the discovered scope to construct the dynamic API request and are listed independently, so one failed list does not stop other types. Crossplane classification combines schema, ownership/metadata conventions, and available object-level evidence; see [Crossplane compatibility](crossplane.md). Only confirmed Managed Resources appear in the default list; possible candidates remain in the internal discovery result.
 
-## Relationships (Phase 2)
+Discovery diagnostics include the active context, CRD and classification counts, possible-classification reasons, per-group/version discovery failures and dynamic API matching problems, per-type list outcomes, and normalized totals. Set `X9S_LOG_FILE` to append structured diagnostics to a file. `RUST_LOG` controls the filter; when no log file is configured, diagnostics use a warning-level sink and do not write over the terminal UI.
 
-Use explicit Crossplane owner references, composition resource references, and provider configuration references. Never infer relationships from name similarity. External cloud objects may only be represented when verifiable metadata exists.
+Kubernetes may return an empty string in a list response's `metadata.continue` field to indicate that pagination is complete. The CRD and resource paginators treat both an absent and empty continuation token as completion. Previously, the empty string was treated as another page token, causing x9s to repeatedly request the same page and remain in loading state.
 
-## Security
+The UI is initially Managed Resource focused. Other Crossplane families are classified internally, but do not have separate browser views in Phase 1. Partial API failures are shown as errors while retaining the last successful resource list where available.
 
-No cluster installation. No mutation in Phase 1. Do not print Secret payloads or credentials to the screen or logs. TLS and RBAC behavior must follow Kubernetes client defaults.
+## Security and scope
 
-## Design decision log
+The application is read-only and requires no cluster-side installation. It follows kubeconfig authentication, TLS, RBAC, and namespace scope. It does not inspect Secret values or log credentials. YAML and Events views, relationship navigation, and resource modifications are outside Phase 1.
 
-- **D001:** Rust + Ratatui + Crossterm for terminal UI.
-- **D002:** kube-rs dynamic APIs for arbitrary provider types.
+## Design decisions
+
+- **D001:** Rust + Ratatui + Crossterm for the terminal UI.
+- **D002:** kube-rs dynamic APIs for arbitrary installed resource types.
 - **D003:** Read-only initial release.
-- **D004:** Crossplane interpretation is separate from Kubernetes transport and UI.
+- **D004:** Kubernetes transport, Crossplane interpretation, normalized model, and UI are separate responsibilities.
+- **D005:** Conservative three-way classification; uncertain resources are not promoted into the default MR list.
 
 ## Terminal UI reference
 
-Use the [official Ratatui documentation](https://ratatui.rs/) for framework guidance and current conventions. Do not introduce another TUI framework or an extra UI abstraction without a concrete need.
+Use the [official Ratatui documentation](https://ratatui.rs/) for framework guidance and current conventions. Do not introduce another TUI framework without a concrete need.

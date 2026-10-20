@@ -2,42 +2,35 @@
 
 **Crossplane resources at your fingertips.**
 
-x9s is a Rust-based Crossplane resource explorer scaffold. Its planned terminal UI will use Ratatui and Crossterm, with Kubernetes discovery through kube-rs rather than generated provider-specific clients. GitHub is the intended development and release platform.
+x9s is a read-only Rust terminal browser for Crossplane managed resources. It uses the current kubeconfig context, discovers Kubernetes APIs dynamically, and renders resources in a Ratatui interface. It does not install components in the cluster or modify Kubernetes resources.
 
-## Status
+## Quick start
 
-**Starter scaffold only.** Kubernetes connectivity and the TUI are not implemented yet. The executable supports `--version`.
-
-## Start developing
-
-Install [Devbox](https://www.jetify.com/docs/devbox/installing_devbox/) for your platform, then enter the project environment. Devbox supplies the pinned Rust toolchain and development utilities declared by this repository.
+Install [Devbox](https://www.jetify.com/docs/devbox/installing_devbox/) and use the repository's pinned Rust environment:
 
 ```bash
 git clone <repository>
 cd x9s
+devbox run run
+```
 
+Or enter the environment and run the application directly:
+
+```bash
 devbox shell
-
-cargo build
 cargo run
 ```
 
-Or use the project commands:
+The browser lists confirmed Managed Resources by default. Use `/` to filter, `Enter` to inspect details, `r` to refresh, and `q` to exit. See [usage](docs/usage.md) for keyboard controls and [Crossplane compatibility](docs/crossplane.md) for discovery and classification behavior.
 
-```bash
-devbox run build
-devbox run test
-devbox run lint
-devbox run ci
-```
+## Development
 
-Read [development instructions](docs/development.md) for setup, toolchain updates, and version management. See the [documentation index](docs/README.md) and [roadmap](docs/roadmap.md) for project status.
-
-The planned Homebrew distribution path is the [`e-a-s-t/homebrew-tap`](https://github.com/e-a-s-t/homebrew-tap) tap. The formula may not yet be available; release details are in the [GitHub delivery plan](docs/github.md).
+Use Devbox for build and validation commands. See [development](docs/development.md), the [documentation index](docs/README.md), and [roadmap](docs/roadmap.md) for project status and development guidance.
 
 ## Design principles
 
-- Read-only first; use current kubeconfig.
-- Crossplane v1/v2, namespaced and cluster-scoped resources.
-- No hardcoded provider resource kinds or cluster-side installation.
-- Useful troubleshooting without leaking credentials.
+- Read-only access through the active kubeconfig context.
+- Crossplane v1 and v2; discovered namespace and cluster scopes.
+- No provider-specific kind lists or required cluster-side components.
+- Conservative classification: only confirmed Managed Resources appear by default.
+- Never display or log Kubernetes credentials or Secret values.

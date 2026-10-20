@@ -2,7 +2,19 @@
 name = "x9s"
 version = "0.1.0"
 edition = "2021"
-description = "Crossplane-aware terminal resource explorer (starter scaffold)"
+description = "Read-only Crossplane resource explorer for Kubernetes"
 license = "Apache-2.0"
 
-# Dependencies will be introduced with the first implementation task.
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+kube = { version = "0.98", features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.24", features = ["v1_30"] }
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

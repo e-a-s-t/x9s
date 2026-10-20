@@ -1,0 +1,16 @@
+{
+  "apiVersion": "s3.aws.upbound.io/v1beta1",
+  "kind": "Bucket",
+  "metadata": {
+    "name": "fixture-bucket",
+    "uid": "fixture-v1-uid",
+    "creationTimestamp": "2025-01-01T00:00:00Z",
+    "annotations": { "crossplane.io/external-name": "external-bucket" },
+    "ownerReferences": [{ "apiVersion": "example.org/v1", "kind": "StorageXR", "name": "storage" }]
+  },
+  "spec": { "forProvider": { "region": "us-east-2" }, "providerConfigRef": { "name": "default" } },
+  "status": { "atProvider": {}, "conditions": [
+    { "type": "Synced", "status": "True", "reason": "ReconcileSuccess", "message": "synchronized", "lastTransitionTime": "2025-01-01T00:01:00Z" },
+    { "type": "Ready", "status": "False", "reason": "Creating", "message": "waiting for provider" }
+  ] }
+}

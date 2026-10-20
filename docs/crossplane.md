@@ -1,30 +1,39 @@
 # Crossplane Compatibility and Resource Model
 
-**Status: intended compatibility design.**
+**Status: Phase 1 discovery and interpretation.**
 
 ## Resource families
 
-- Managed resources (provider-backed external resources)
-- Composite resources (XRs), and legacy claims where installed
-- CompositeResourceDefinitions (XRDs)
-- Compositions and CompositionRevisions
-- Providers and ProviderRevisions
-- Functions and FunctionRevisions
-- ProviderConfigs, whose API groups and scopes vary by provider
-- Operations where available
+Discovery recognizes Crossplane resource families, including Managed Resources (MRs), Composite Resources (XRs), CompositeResourceDefinitions (XRDs), Compositions and CompositionRevisions, Providers and ProviderRevisions, Functions and FunctionRevisions, and ProviderConfigs. The interface in this phase is focused on confirmed MRs; family recognition does not imply a dedicated view for every family.
 
-## Crossplane v1 and v2
+Provider-specific kinds and API groups are not maintained in a static list. API resources are discovered from the cluster. Scope is taken from Kubernetes discovery, supporting both cluster-scoped resources and namespaced resources, including Crossplane v2 namespaced MRs.
 
-Crossplane installations may mix older cluster-scoped managed resources with newer namespaced resources. The UI must derive scope from Kubernetes discovery rather than guessing based on kind or API group. Composite-resource behavior and supported API versions also vary: probe what is installed rather than assuming a universal API surface.
+## Managed Resource classification
 
-## Classification strategy
+Classification returns one of three outcomes:
 
-Discover served API resources and their CRDs; identify Crossplane types using well-defined CRD/API metadata and Crossplane conventions, with test fixtures for supported variants. Treat uncertain classification as unknown. Do not label arbitrary resources as managed resources solely because they have `spec.forProvider`.
+| Result | Meaning | Default list |
+| --- | --- | --- |
+| **Confirmed Managed Resource** | Available evidence supports treating the resource as an MR. | Included |
+| **Possible Managed Resource** | Some evidence is consistent with an MR, but evidence is insufficient for a confident classification. | Excluded; retained internally |
+| **Not a Managed Resource** | Evidence identifies another family or does not support MR classification. | Excluded |
 
-## Conditions
+At the CRD level, strong MR schema evidence requires both `spec.forProvider` and `status.atProvider`. That evidence confirms an MR when accompanied by any recognized Crossplane ownership or metadata convention: ownership by a `pkg.crossplane.io` ProviderRevision, ownership by an `apiextensions.crossplane.io` `ManagedResourceDefinition`, both `crossplane` and `managed` CRD categories, a `pkg.crossplane.io/` label, a `meta.crossplane.io/` annotation, or the generic Crossplane v2 managed-resource API group convention (the `.m.` group segment). These signals support custom Upjet providers whose API groups use organization-specific domains, including VCD-style groups; provider names, API groups, kinds, and CRD names are not enumerated in x9s.
 
-Parse `status.conditions` defensively. Show `Ready`, `Synced`, and other available conditions with status, reason, message, and transition time. Missing fields remain unknown. Distinguish API fetch failures from missing conditions.
+Weaker schema evidence with `spec.forProvider` yields Possible. For a Possible candidate with `spec.forProvider`, object-level signals can add evidence: the `crossplane.io/external-name` annotation, `spec.providerConfigRef`, Ready/Synced conditions, and owner references. Two or more of those object-level signals promote the candidate to Confirmed. A generic `forProvider` field or an API group containing `crossplane` alone is not enough to confirm an MR. Possible candidates remain excluded from the default list, with the CRD evidence reasons available in diagnostic logs.
 
-## Relationships (Phase 2)
+Only confirmed MRs appear in the default resource table. Possible MRs are retained in the internal classification/discovery results so future inspection and configuration can expose them without changing provider-specific code. This version does not provide a UI toggle for possible resources.
 
-Use explicit owner references, XR `resourceRefs` or supported equivalent references, Composition references, and `providerConfigRef` fields where applicable. Avoid guessing based on names. Verify against actual fixtures before declaring v1/v2 support.
+Classification is necessarily conservative and depends on metadata, schema, and object data exposed by the cluster. Providers differ in generated schemas and metadata, and older or customized installations may omit useful signals. A legitimate MR can therefore remain Possible and be absent from the default list. Object-level promotion does not identify arbitrary non-MR schemas from annotations or conditions alone. Classification is not proof that a provider controller is installed or healthy. A resource classified as Not may still merit investigation if its provider uses nonstandard conventions; please report a sanitized fixture when encountering one.
+
+## Conditions and normalized resources
+
+The normalized resource includes API version, kind, name, optional namespace and UID, creation time, external name when present, Ready and Synced status, and the original Kubernetes object for future extensions. Condition statuses distinguish True, False, Unknown, and Missing. Missing conditions or malformed condition entries never imply success. Details show available condition reasons and messages without fabricating absent fields.
+
+## Compatibility limitations
+
+- Kubernetes API discovery and CRD reads are subject to the current user's RBAC permissions. Incomplete discovery can prevent classification or listing of some APIs.
+- API-level evidence can classify an installed resource family before any instances exist; object-level evidence may only be available when listing succeeds.
+- Custom provider CRDs may not use a Crossplane-named API group. Classification uses schema plus ownership, metadata/category, or v2 group-convention evidence; providers that omit these signals can remain Possible.
+- This release lists MRs and offers resource details. It does not yet provide XR relationship trees, YAML inspection, Events, or dedicated views for the other recognized families.
+- No provider-specific kind catalog is bundled, so newly installed provider APIs do not require an x9s update.

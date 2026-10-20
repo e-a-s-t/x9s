@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-x9s is a Rust-based Crossplane resource explorer built with Ratatui and Crossterm, integrated with Kubernetes through kube-rs. The scaffold is not yet implemented; see the roadmap for planned phases.
+x9s is a Rust-based, read-only Crossplane resource explorer built with Ratatui and Crossterm, integrated with Kubernetes through kube-rs. Phase 1 lists confirmed Managed Resources; see the roadmap for scope and later phases.
 
 Use Devbox as the standard development environment; see [docs/development.md](docs/development.md) for setup and commands.
 

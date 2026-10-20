@@ -1,0 +1,10 @@
+{
+  "apiVersion": "nsxt.vcd.carekube.com/v1alpha1",
+  "kind": "NATRule",
+  "metadata": { "name": "talos-bootstrap-cp01", "creationTimestamp": "2026-10-20T07:30:05Z", "annotations": { "crossplane.io/external-name": "talos-bootstrap-cp01" } },
+  "spec": { "forProvider": {}, "providerConfigRef": { "name": "default" } },
+  "status": { "atProvider": {}, "conditions": [
+    { "type": "Synced", "status": "False", "reason": "ReconcileError", "message": "fixture provider failure" },
+    { "type": "Ready", "status": "True", "reason": "Available" }
+  ] }
+}

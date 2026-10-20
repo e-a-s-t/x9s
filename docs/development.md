@@ -1,6 +1,6 @@
 # Development
 
-**Status: Devbox environment configured; Ratatui UI and Kubernetes integration are not implemented.**
+**Status: Devbox is the supported Rust environment for the Phase 1 application.**
 
 ## Install and enter Devbox
 
@@ -44,6 +44,16 @@ devbox run ci
 
 The CI script runs `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, then `cargo test`.
 
+## Discovery diagnostics
+
+To capture discovery diagnostics without interfering with the Ratatui interface, set `X9S_LOG_FILE` to a writable file path before starting x9s. The file is opened in append mode and missing parent directories are created. For example:
+
+```bash
+X9S_LOG_FILE=/tmp/x9s-discovery.log RUST_LOG=debug devbox run run
+```
+
+When a log file is configured, the default filter is `info`; `RUST_LOG` overrides it. Without `X9S_LOG_FILE`, logging goes to a sink at `warn` level, and stdout remains dedicated to the TUI. Discovery records context and aggregate counts, classification reasons for Possible resources, API discovery mismatches, and per-type listing outcomes. Error events record Kubernetes error categories rather than request bodies or credentials. Never share kubeconfig contents, tokens, or Secret values when reporting an issue.
+
 ## Toolchain and dependencies
 
 Devbox package versions are pinned in `devbox.json`, and the lockfile should be committed with environment changes. To update the Rust toolchain or a development utility, edit its package version in `devbox.json`, regenerate the lockfile with `devbox update`, then review the resolved diff and run `devbox run ci`. Keep rustc, Cargo, rustfmt, and Clippy on the same compatible Rust release. `rust-toolchain.toml` is not used; Devbox is the toolchain source of truth.
@@ -63,16 +73,16 @@ devbox run major
 
 Each bump reports the old and new versions and leaves changes in the working tree for review. For example, a patch bump of `0.1.0` produces `0.1.1`; a minor bump of `0.1.1` produces `0.2.0`; a major bump of `0.2.0` produces `1.0.0`. These commands do not commit, tag, push, or publish. Keep version bumping separate from release publishing.
 
-## Planned dependencies and conventions
+## Dependencies and conventions
 
-Ratatui is the mandatory TUI framework and Crossterm handles terminal input and events. Other planned dependencies include kube-rs, Tokio, Serde, serde_json, serde_yaml, tracing, anyhow/thiserror. Add dependencies only as required by working features; do not prepopulate unused modules.
+Ratatui is the mandatory TUI framework and Crossterm handles terminal input and events. Kubernetes access uses kube-rs with Tokio; Serde/JSON support resource data, and tracing is used for diagnostics. Add dependencies only as required by working features; do not prepopulate unused modules.
 
-Keep modules aligned to responsibilities: `kubernetes/`, `crossplane/`, `model/`, `ui/`. Prefer typed domain models at boundaries; use dynamic objects for provider resources. Add unit tests for parsers and fixture-based classification tests without cluster access. Keep network operations asynchronous. Update docs in the same change as behavior.
+Keep modules aligned to responsibilities: `kubernetes/`, `crossplane/`, `model/`, `ui/`. Prefer typed domain models at boundaries; use dynamic objects for provider resources. Add unit tests for parsers and fixture-based classification/normalization tests without cluster access, including custom Upjet groups, Crossplane v2, both resource scopes, and unrelated CRDs. Keep network operations asynchronous. Update docs in the same change as behavior.
 
 For the UI, follow Ratatui's application patterns: maintain app state independently, handle input with Crossterm, compose screens from Ratatui widgets and layouts, and render in the terminal draw loop. Do not perform Kubernetes calls or other blocking work during rendering; run I/O asynchronously and deliver results back to the UI.
 
 The project is intended to use GitHub for source hosting and code review. See [GitHub CI and delivery](github.md) for the proposed Actions and release process.
 
-## First task
+## Phase 1 behavior
 
-Implement Phase 1 incrementally: kubeconfig connection, discovery, classification, managed-resource table, condition parsing, selection/details/YAML/events, filtering, and robust error handling. See [roadmap](roadmap.md) and [test cases](testcases.md).
+The application uses the current kubeconfig context, dynamically discovers APIs, and presents confirmed Managed Resources in a read-only TUI. Possible MRs are retained internally and excluded from the default list. Resource details, filtering, refresh, and condition parsing are part of the initial interface. YAML and Events views are not implemented. See [usage](usage.md), [Crossplane compatibility](crossplane.md), and [roadmap](roadmap.md).

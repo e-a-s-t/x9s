@@ -1,33 +1,32 @@
 # Roadmap
 
-## Phase 0 — Starter scaffold (current)
+## Phase 0 — Starter scaffold (complete)
 
-Repository instructions, documentation, Cargo project, and placeholder executable. No Kubernetes or TUI functionality yet.
+Repository conventions, documentation, and Devbox environment.
 
-## Phase 1 — Read-only resource browser
+## Phase 1 — Read-only resource browser (implemented)
 
-- kubeconfig and context support
-- Dynamic API discovery and Crossplane classification
-- Namespaced and cluster-scoped managed resources
-- Responsive Ratatui resource table and navigation
-- Condition/health display
-- Resource details, YAML, and Kubernetes Events
-- Filtering and graceful handling of errors/RBAC restrictions
-- Fixture-based tests and updated usage/support docs
+- Current kubeconfig context and asynchronous Kubernetes access.
+- Dynamic API discovery with namespace and cluster scopes.
+- Conservative Crossplane family/MR classification, including Confirmed, Possible, and Not a Managed Resource results.
+- Default list of confirmed MRs, with condition status and normalized metadata.
+- Ratatui table, filtering, selection, details, refresh, and clear error/loading states.
+- Fixture-based tests and documentation for supported behavior and limitations.
 
-**Done when:** `cargo build --release`, formatting, linting, and tests pass; the app can browse installed managed resources without modifying them.
+Phase 1 remains read-only. Possible MRs are held internally but are not selectable in the UI. YAML and Events views, relationship navigation, provider logs, and dedicated views for other resource families are not included.
+
+Build, formatting, lint, unit tests, CLI checks, and TUI startup/exit have been verified. Live-cluster access remains environment-dependent and must only be claimed after a successful connection.
 
 ## Phase 2 — Crossplane intelligence
 
-- XR/composed-resource tree navigation
-- Composition and ProviderConfig relationships
-- Provider health and reconciliation troubleshooting
-- Explicit reference-based navigation; no name guessing
+- XR and composed-resource navigation based on explicit references.
+- Composition and ProviderConfig relationships.
+- Provider health and reconciliation troubleshooting.
 
-## Phase 3 — Advanced operations (requires approval)
+## Phase 3 — Advanced operations (requires explicit scope and approval)
 
-- Explicit reconcile actions and safe editing
-- Destructive actions only with clear confirmation
-- Provider log correlation, richer dashboards, context switching
+- Any resource editing or reconciliation actions, with safety controls.
+- Destructive operations only after a separate design and explicit confirmation requirements.
+- Provider log correlation and richer dashboards.
 
-Never represent planned capabilities as implemented in user documentation.
+Never describe planned capabilities as implemented in user documentation.

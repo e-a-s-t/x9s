@@ -1,0 +1,98 @@
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConditionStatus {
+    True,
+    False,
+    Unknown,
+    Missing,
+}
+
+impl ConditionStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::True => "True",
+            Self::False => "False",
+            Self::Unknown => "Unknown",
+            Self::Missing => "Missing",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Condition {
+    pub status: ConditionStatus,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub last_transition_time: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)] // The variant names mirror the classification contract.
+pub enum Classification {
+    ConfirmedManagedResource,
+    PossibleManagedResource,
+    NotManagedResource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResourceFamily {
+    ManagedResource,
+    CompositeResource,
+    CompositeResourceDefinition,
+    Composition,
+    CompositionRevision,
+    Provider,
+    ProviderRevision,
+    Function,
+    FunctionRevision,
+    ProviderConfig,
+    Other,
+}
+
+impl ResourceFamily {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ManagedResource => "Managed Resource",
+            Self::CompositeResource => "Composite Resource",
+            Self::CompositeResourceDefinition => "CompositeResourceDefinition",
+            Self::Composition => "Composition",
+            Self::CompositionRevision => "CompositionRevision",
+            Self::Provider => "Provider",
+            Self::ProviderRevision => "ProviderRevision",
+            Self::Function => "Function",
+            Self::FunctionRevision => "FunctionRevision",
+            Self::ProviderConfig => "ProviderConfig",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Resource {
+    pub api_version: String,
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+    pub uid: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub external_name: Option<String>,
+    pub synced: Condition,
+    pub ready: Condition,
+    pub family: ResourceFamily,
+    pub classification: Classification,
+    #[allow(dead_code)] // Retained for future object inspection views.
+    pub original: Value,
+}
+
+pub fn sort_resources(resources: &mut [Resource]) {
+    resources.sort_by(|a, b| {
+        (&a.kind, &a.api_version, &a.namespace, &a.name).cmp(&(
+            &b.kind,
+            &b.api_version,
+            &b.namespace,
+            &b.name,
+        ))
+    });
+}

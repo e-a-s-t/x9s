@@ -1,0 +1,15 @@
+{
+  "apiVersion": "s3.aws.m.upbound.io/v1beta1",
+  "kind": "Bucket",
+  "metadata": {
+    "name": "fixture-namespaced-bucket",
+    "namespace": "team-a",
+    "uid": "fixture-v2-uid",
+    "creationTimestamp": "2025-02-01T00:00:00Z"
+  },
+  "spec": { "forProvider": { "region": "us-east-2" } },
+  "status": { "atProvider": {}, "conditions": [
+    { "type": "Synced", "status": "Unknown" },
+    { "type": "Ready", "status": "True", "reason": "Available" }
+  ] }
+}

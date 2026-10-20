@@ -1,23 +1,37 @@
 # Support and Troubleshooting
 
-**Status: diagnostic guide for planned functionality.**
+**Status: Phase 1 diagnostic guidance.**
 
 ## Connection failures
 
-Verify `kubectl config current-context` and `kubectl cluster-info`. Ensure the current kubeconfig points to the intended cluster. x9s must not bypass TLS checks or request elevated privileges.
+Check `kubectl config current-context` and `kubectl cluster-info` to confirm the active kubeconfig context and connectivity. x9s uses the current context and follows Kubernetes authentication and TLS configuration. Check credential plugin setup and access expiration locally; do not paste kubeconfig files or tokens into an issue.
 
 ## Missing resources
 
-Check `kubectl api-resources` and confirm Crossplane/provider CRDs exist. Check the selected namespace and permissions (`kubectl auth can-i list <resource> --all-namespaces`). Crossplane may be installed without any managed-resource CRDs.
+Check `kubectl api-resources` and confirm the relevant provider CRDs are installed. Verify permission to discover CRDs and list the resource (`kubectl auth can-i list <resource> --all-namespaces`). Namespace and cluster scopes come from API discovery. API discovery/listing can be incomplete when RBAC denies access.
+
+For discovery details, run x9s with a log file:
+
+```bash
+X9S_LOG_FILE=/tmp/x9s-discovery.log RUST_LOG=debug devbox run run
+```
+
+Review the trace for the active context, number of CRDs, confirmed/possible/excluded type counts, reasons a CRD was Possible, API group/version/resource matching, discovered scope, and per-type list result. A missing API group/version/plural match is logged separately from an API list error. API discovery uses a cached result per CRD group/version; a failure for one group/version is reported and does not stop discovery and listing for other groups and versions. Error records use a Kubernetes error category and avoid request bodies. If one type fails to list, x9s continues with other types. The log file is append-only; choose a path with appropriate local access controls before sharing it.
+
+An earlier discovery hang was caused by treating an empty `metadata.continue` value as a next-page token. That caused repeated requests for the same list page. Both CRD discovery and resource listing now treat an empty continuation value as pagination completion.
+
+Only confirmed Managed Resources appear in the default list. A resource can be a valid provider MR yet remain classified as Possible if the cluster does not expose enough classification evidence. The current interface has no control for including Possible resources. See [Crossplane classification](crossplane.md) for the evidence and limitations.
+
+Custom Upjet providers do not need Crossplane-named API groups. A CRD with `spec.forProvider` and `status.atProvider` can be confirmed through provider ownership, Crossplane `ManagedResourceDefinition` ownership, Crossplane managed categories, package labels/metadata annotations, or the Crossplane v2 `.m.` group convention. If a CRD is Possible, its diagnostic reason list shows which evidence was observed. Do not treat a provider API group name alone as proof that a CRD is a Managed Resource.
 
 ## Unknown or unhealthy conditions
 
-Inspect resource `status.conditions`, Kubernetes Events, and the relevant provider controller. A missing `Ready` or `Synced` condition is not proof of success. Not all resources expose identical status fields.
+The details view shows Ready and Synced status plus available reasons and messages. A missing or malformed condition does not imply success. Not all providers expose identical status fields. Investigate provider/controller health with your established Kubernetes tools; x9s does not provide Events or provider logs in Phase 1.
 
 ## Reporting bugs
 
-Report bugs and request features through GitHub Issues. Include x9s version, OS/terminal, Kubernetes version, Crossplane version, affected API group/kind, steps to reproduce, and sanitized logs. **Remove tokens, kubeconfigs, Secret values, and private infrastructure identifiers before sharing.**
+Report issues through GitHub. Include x9s version, OS/terminal, Kubernetes and Crossplane versions, affected API group/kind, sanitized steps, and relevant non-sensitive error text. Remove tokens, kubeconfigs, Secret values, and private infrastructure identifiers before sharing.
 
 ## Current limitations
 
-The starter contains no Kubernetes connection, discovery, or TUI yet. The first release will be read-only; log correlation and relationship navigation are later-phase features.
+x9s is read-only. The UI currently lists confirmed MRs and supports details, filtering, and manual refresh. Possible MRs are retained internally but not exposed in the interface. YAML inspection, Events, relationship navigation, provider log inspection, and dedicated views for other Crossplane families are not implemented.

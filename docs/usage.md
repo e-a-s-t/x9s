@@ -1,38 +1,51 @@
 # Usage
 
-**Status: planned TUI; the current executable is a placeholder and does not connect to Kubernetes.**
+**Status: Phase 1 interface.**
 
-The executable reports its compiled package version:
+Run x9s using the current kubeconfig context:
 
 ```bash
-x9s --version
+devbox run run
 ```
 
-The output follows `x9s MAJOR.MINOR.PATCH` (for example, `x9s 0.1.0`). The version comes from Cargo package metadata at compile time. See [development](development.md) for version bump commands.
+The application also supports `--help` and `--version`. The version is derived from Cargo package metadata at compile time. No in-cluster installation is required. The UI displays the active context, lists confirmed Managed Resources, and shows loading or API error state as applicable. See [Crossplane compatibility](crossplane.md) for how resources are classified.
 
-Eventually, running `x9s` will open the terminal interface using the current kubeconfig context. No in-cluster installation is required.
+For CLI checks from Devbox, pass arguments directly to Cargo:
 
-The planned interface uses Ratatui for rendering and Crossterm for keyboard input and terminal events. UI rendering remains separate from Kubernetes requests; asynchronous results update the view without blocking interaction. The TUI commands below are planned and are not available in the current scaffold.
+```bash
+devbox run -- cargo run -- --help
+devbox run -- cargo run -- --version
+```
 
-## Planned commands
+## Discovery diagnostics
 
-| Input | Action |
+Discovery logs can be enabled without writing to the terminal UI by setting `X9S_LOG_FILE`:
+
+```bash
+X9S_LOG_FILE=/tmp/x9s-discovery.log RUST_LOG=debug devbox run run
+```
+
+The file is append-only. When a path is configured, the default log level is `info`; `RUST_LOG` overrides the filter. Without a log file, only warning-level events are enabled and sent to a sink. Logs report context, discovery/classification totals, Possible classification reasons, dynamic API matching, listing errors, and per-type instance counts. See [Support](support.md) for interpreting a discovery trace.
+
+## Resource list
+
+The table shows Kind, Name, Namespace, Synced, Ready, and Age. Cluster-scoped resources show `-` for namespace. Condition labels distinguish True, False, Unknown, and Missing; status is not conveyed by color alone. The list supports keyboard selection and scrolling, including larger result sets. Refresh attempts preserve the selected resource when it remains present. If a refresh fails, x9s reports the error and retains the last successful list.
+
+## Keyboard controls
+
+| Key | Action |
 | --- | --- |
-| `:mr` | Managed resources |
-| `:xr` | Composite resources |
-| `:providers` | Providers |
-| `:functions` | Functions |
-| `:compositions` | Compositions |
-| `:xrd` | XRDs |
-| `:pc` | ProviderConfigs |
-| `Enter` | Resource details |
-| `Esc` | Back |
-| `d` | Describe |
-| `y` | YAML |
-| `e` | Events |
-| `/` | Filter |
-| `r` | Refresh |
-| `q` | Quit/back |
+| `j` / `Down` | Select the next resource |
+| `k` / `Up` | Select the previous resource |
+| `Enter` | Open selected resource details |
+| `Esc` | Close details or leave filter entry |
+| `/` | Enter a case-insensitive filter for kind, name, or namespace |
+| `r` | Refresh resources |
+| `q` | Quit |
 | `Ctrl+C` | Exit |
 
-Phase 1 prioritizes the managed resource list, selection, details, YAML, events, and filtering. Later views may initially be unavailable. Tables should include Kind, Name, Namespace, Synced, Ready, and Age; missing conditions should display as unknown, not healthy.
+The details view shows API version, kind, name, namespace, UID, creation time, external name when available, Ready and Synced status, and condition reasons/messages when present. Missing fields are shown as unavailable rather than inferred.
+
+## Scope
+
+Only confirmed Managed Resources appear in the default list. Possible Managed Resources are retained internally but cannot yet be enabled from the UI. YAML inspection, Kubernetes Events, relationship navigation, and dedicated screens for other Crossplane families are not available in this phase. All Kubernetes operations are read-only.

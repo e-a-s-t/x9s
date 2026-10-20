@@ -1,23 +1,41 @@
 # Test Cases
 
-**Status: acceptance plan; tests are not yet implemented.**
+**Status: Phase 1 unit tests and manual acceptance scenarios.**
 
-| ID | Scenario | Expected result | Phase |
+## Automated unit tests
+
+Unit tests use fixtures and do not require Kubernetes:
+
+- Upjet v1 cluster-scoped Managed Resource CRD and instance normalization.
+- Custom Upjet VCD fixtures for VM, Vapp, and NATRule CRDs and instances, confirming that non-Crossplane-named API groups with Crossplane controller ownership are normalized as Managed Resources.
+- VCD NATRule condition preservation (`Synced=False`, `Ready=True`) and same-kind resources remaining distinct across API groups.
+- Crossplane v2 namespaced Managed Resource CRD and instance normalization.
+- Non-Crossplane CRD exclusion, schema-only Possible classification, and object-level evidence promotion.
+- Crossplane core family and custom Composite Resource recognition.
+- Missing, malformed, True, False, and Unknown condition parsing.
+- Case-insensitive filtering, deterministic sorting, and selection preservation after refresh.
+- Dynamic CRD version and scope parsing.
+- Dynamic API discovery matching by group, version, kind, plural, LIST capability, and API-discovered scope.
+- Empty Kubernetes list continuation token ends pagination for both CRD discovery and resource listing.
+
+Run them with `devbox run test` or as part of `devbox run ci`.
+
+## Manual acceptance scenarios
+
+These scenarios require a configured terminal and, where noted, a reachable cluster. They are not automated unit tests.
+
+| ID | Scenario | Expected result | Prerequisite |
 | --- | --- | --- | --- |
-| T01 | Valid kubeconfig | Connect using selected context | 1 |
-| T02 | Missing/invalid kubeconfig | Actionable error, no panic | 1 |
-| T03 | Cluster without Crossplane CRDs | Clear empty state | 1 |
-| T04 | Dynamic provider CRD | Resource appears without hardcoded kind | 1 |
-| T05 | Crossplane v1 cluster-scoped MR | Correctly listed and scoped | 1 |
-| T06 | Crossplane v2 namespaced MR | Correctly listed and scoped | 1 |
-| T07 | Missing `status.conditions` | Unknown state, no panic | 1 |
-| T08 | Ready=True, Synced=False | Distinct condition values shown | 1 |
-| T09 | RBAC forbids one API resource | Partial results and visible warning | 1 |
-| T10 | Resource disappears during selection | Recover gracefully | 1 |
-| T11 | Large resource list | Responsive filtering/navigation | 1 |
-| T12 | Inspect YAML and Events | Correct selected resource and scope | 1 |
-| T13 | XR composed resources | Tree based on actual references | 2 |
-| T14 | ProviderConfig relationship | Follows explicit reference | 2 |
-| T15 | Secret-bearing objects/logs | No sensitive data leaked | 1 |
+| M01 | Start x9s with a valid kubeconfig | Uses the active context and shows its name | Reachable cluster |
+| M02 | Missing/invalid kubeconfig or auth failure | Clear error and clean TUI recovery; no panic | Terminal |
+| M03 | Cluster without Crossplane MRs | Clear empty state | Reachable cluster |
+| M04 | RBAC denies a discovered API | Partial results and a visible error; last successful list remains usable | Cluster with scoped RBAC |
+| M05 | Refresh while selected resource remains | Selection is preserved | Reachable cluster |
+| M06 | Long names, large results, and terminal resize | Table remains usable and navigation responsive | Reachable cluster |
+| M07 | `--help` and `--version` | CLI exits without starting the TUI | Devbox |
+| M08 | Secret-bearing objects or credential errors | Credentials and Secret values are not shown or logged | Sanitized test environment |
+| M09 | Enable diagnostics with `X9S_LOG_FILE` | Discovery trace is appended to the configured file while the TUI remains readable; `RUST_LOG` controls verbosity | Writable log path and reachable cluster |
+| M10 | One confirmed resource API denies or fails a list | Other confirmed resource types are still attempted; diagnostics identify the failed type and error category | Cluster with scoped RBAC or an API failure |
+| M11 | Kubernetes returns an empty `metadata.continue` value | Pagination completes instead of repeatedly requesting the same page | Unit test; no cluster required |
 
-Use fixtures under `tests/fixtures/crossplane-v1/` and `tests/fixtures/crossplane-v2/`. Unit tests should run without a cluster. Separate live-cluster integration tests and clearly mark their prerequisites. Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` for every change.
+Live-cluster behavior is verified only after x9s successfully connects to a cluster. Unit tests and local TUI startup do not establish Kubernetes connectivity.
