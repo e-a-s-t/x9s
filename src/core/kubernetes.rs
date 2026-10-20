@@ -7,15 +7,54 @@ use kube::{
     discovery::{pinned_group, verbs, ApiCapabilities, Scope},
     Client, Config,
 };
+use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use crate::{
+use crate::core::{
     crossplane::{self, CrdInfo},
-    model::{sort_resources, Resource, ResourceFamily},
+    models::{sort_resources, Classification, Resource, ResourceFamily},
 };
 
 type DiscoveredVersion = std::result::Result<Vec<(ApiResource, ApiCapabilities)>, &'static str>;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryError {
+    pub code: String,
+    pub message: String,
+    pub group: Option<String>,
+    pub version: Option<String>,
+    pub kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TypeClassification {
+    pub group: String,
+    pub version: String,
+    pub kind: String,
+    pub classification: crate::core::models::Classification,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoveryReport {
+    pub context: String,
+    pub connected: bool,
+    pub crd_count: usize,
+    pub confirmed_types: usize,
+    pub possible_types: usize,
+    pub excluded_types: usize,
+    pub managed_instance_count: usize,
+    pub resources: Vec<Resource>,
+    pub classifications: Vec<TypeClassification>,
+    pub errors: Vec<DiscoveryError>,
+}
+
+impl DiscoveryReport {
+    pub fn is_partial(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
 
 #[derive(Clone)]
 pub struct Kubernetes {
@@ -24,18 +63,27 @@ pub struct Kubernetes {
 }
 
 impl Kubernetes {
-    pub async fn connect() -> Result<Self> {
-        let config = Config::infer().await.context(
-            "Could not load Kubernetes configuration. Check KUBECONFIG and the current context.",
+    pub async fn connect(context: Option<&str>) -> Result<Self> {
+        let config = match context {
+            Some(context) => Config::from_kubeconfig(&kube::config::KubeConfigOptions {
+                context: Some(context.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .map_err(anyhow::Error::from),
+            None => Config::infer().await.map_err(anyhow::Error::from),
+        }
+        .context(
+            "Could not load Kubernetes configuration. Check KUBECONFIG and the selected context.",
         )?;
-        let context = context_label();
+        let context = context.map(str::to_owned).unwrap_or_else(context_label);
         Ok(Self {
             client: Client::try_from(config).context("Could not initialize Kubernetes client")?,
             context,
         })
     }
 
-    pub async fn list_managed_resources(&self) -> Result<(Vec<Resource>, Vec<String>)> {
+    pub async fn list_managed_resources(&self) -> Result<DiscoveryReport> {
         info!(context = %self.context, "starting Crossplane resource discovery");
         let crds: Api<DynamicObject> = Api::all_with(
             self.client.clone(),
@@ -70,7 +118,8 @@ impl Kubernetes {
         }
         let crd_count = crd_items.len();
         let mut resources = Vec::new();
-        let mut warnings = Vec::new();
+        let mut errors = Vec::new();
+        let mut classifications = Vec::new();
         let mut confirmed_types = 0usize;
         let mut possible_types = 0usize;
         let mut excluded_types = 0usize;
@@ -93,16 +142,28 @@ impl Kubernetes {
             };
             let classification = crossplane::classify_crd(&info);
             let reasons = crossplane::classification_reasons(&info);
+            classifications.push(TypeClassification {
+                group: info.group.clone(),
+                version: info
+                    .api_version
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+                kind: info.kind.clone(),
+                classification: classification.clone(),
+                reasons: reasons.iter().map(|reason| (*reason).to_owned()).collect(),
+            });
             match classification {
-                crate::model::Classification::ConfirmedManagedResource => {
+                Classification::ConfirmedManagedResource => {
                     confirmed_types += 1;
                     debug!(group = %info.group, kind = %info.kind, reasons = ?reasons, "confirmed Managed Resource CRD");
                 }
-                crate::model::Classification::PossibleManagedResource => {
+                Classification::PossibleManagedResource => {
                     possible_types += 1;
                     info!(group = %info.group, kind = %info.kind, reasons = ?reasons, "possible Managed Resource CRD retained");
                 }
-                crate::model::Classification::NotManagedResource => {
+                Classification::NotManagedResource => {
                     excluded_types += 1;
                     continue;
                 }
@@ -127,10 +188,13 @@ impl Kubernetes {
                 Ok(resources) => resources,
                 Err(error_kind) => {
                     warn!(group = %info.group, version, kind = %info.kind, plural = %info.plural, error_kind, "Kubernetes API group/version discovery failed");
-                    warnings.push(format!(
-                        "{} ({}): API discovery failed ({error_kind})",
-                        info.kind, info.api_version
-                    ));
+                    errors.push(DiscoveryError {
+                        code: (*error_kind).to_owned(),
+                        message: format!("API discovery failed for {}", info.kind),
+                        group: Some(info.group.clone()),
+                        version: Some(version.to_owned()),
+                        kind: Some(info.kind.clone()),
+                    });
                     continue;
                 }
             };
@@ -140,10 +204,13 @@ impl Kubernetes {
                 .cloned()
             else {
                 warn!(group = %info.group, version, kind = %info.kind, plural = %info.plural, "API discovery has no LIST resource matching the CRD");
-                warnings.push(format!(
-                    "{} ({}): API version/resource not found in discovery",
-                    info.kind, info.api_version
-                ));
+                errors.push(DiscoveryError {
+                    code: "resource_not_discovered".into(),
+                    message: format!("No LIST-capable API resource matched {}", info.kind),
+                    group: Some(info.group.clone()),
+                    version: Some(version.to_owned()),
+                    kind: Some(info.kind.clone()),
+                });
                 continue;
             };
             let crd_namespaced = info.namespaced;
@@ -196,8 +263,7 @@ impl Kubernetes {
                         let possible_resources: Vec<_> = page_resources
                             .iter()
                             .filter(|resource| {
-                                resource.classification
-                                    == crate::model::Classification::PossibleManagedResource
+                                resource.classification == Classification::PossibleManagedResource
                             })
                             .collect();
                         if !possible_resources.is_empty() {
@@ -236,10 +302,13 @@ impl Kubernetes {
                 } else {
                     "cluster-scoped"
                 };
-                warnings.push(format!(
-                    "{} ({scope}): Kubernetes API list failed ({error})",
-                    info.kind
-                ));
+                errors.push(DiscoveryError {
+                    code: error.to_owned(),
+                    message: format!("Kubernetes API list failed for {} ({scope})", info.kind),
+                    group: Some(info.group.clone()),
+                    version: Some(version.to_owned()),
+                    kind: Some(info.kind.clone()),
+                });
             } else {
                 info!(
                     context = %self.context,
@@ -254,6 +323,20 @@ impl Kubernetes {
             }
         }
         sort_resources(&mut resources);
+        let mut resource_identities = std::collections::HashSet::new();
+        resources.retain(|resource| {
+            resource_identities.insert((
+                resource.group.clone(),
+                resource.kind.clone(),
+                resource.namespace.clone(),
+                resource.name.clone(),
+            ))
+        });
+        classifications
+            .sort_by(|a, b| (&a.group, &a.kind, &a.version).cmp(&(&b.group, &b.kind, &b.version)));
+        errors.sort_by(|a, b| {
+            (&a.group, &a.version, &a.kind, &a.code).cmp(&(&b.group, &b.version, &b.kind, &b.code))
+        });
         info!(
             context = %self.context,
             crd_count,
@@ -264,7 +347,23 @@ impl Kubernetes {
             normalized_resources = resources.len(),
             "Crossplane resource discovery completed"
         );
-        Ok((resources, warnings))
+        Ok(DiscoveryReport {
+            context: self.context.clone(),
+            connected: true,
+            crd_count,
+            confirmed_types,
+            possible_types,
+            excluded_types,
+            managed_instance_count: resources
+                .iter()
+                .filter(|resource| {
+                    resource.classification == Classification::ConfirmedManagedResource
+                })
+                .count(),
+            resources,
+            classifications,
+            errors,
+        })
     }
 }
 
@@ -301,11 +400,20 @@ fn discovery_resource_matches(
         && capabilities.supports_operation(verbs::LIST)
 }
 
-pub async fn kube_context() -> Result<String> {
-    Config::infer().await.context(
+pub async fn kube_context(context: Option<&str>) -> Result<String> {
+    match context {
+        Some(context) => Config::from_kubeconfig(&kube::config::KubeConfigOptions {
+            context: Some(context.to_owned()),
+            ..Default::default()
+        })
+        .await
+        .map_err(anyhow::Error::from),
+        None => Config::infer().await.map_err(anyhow::Error::from),
+    }
+    .context(
         "Could not load Kubernetes configuration. Check KUBECONFIG and the current context.",
     )?;
-    Ok(context_label())
+    Ok(context.map(str::to_owned).unwrap_or_else(context_label))
 }
 
 fn context_label() -> String {
@@ -381,9 +489,10 @@ mod tests {
     fn matches_discovered_api_by_group_version_kind_plural_and_list_verb() {
         use kube::{core::GroupVersionKind, discovery::ApiResource};
 
-        let value: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm-crd.json"))
-                .unwrap();
+        let value: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/crossplane-vcd/vm-crd.json"
+        ))
+        .unwrap();
         let crd = parse_crd(&value).unwrap();
         let gvk = GroupVersionKind::gvk("vapp.vcd.carekube.com", "v1alpha1", "VM");
         let matching = ApiResource::from_gvk_with_plural(&gvk, "vms");

@@ -17,9 +17,8 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::{
-    app::{App, View},
-    kubernetes::{kube_context, Kubernetes},
-    model::{Condition, ConditionStatus, Resource},
+    core::{kubernetes::kube_context, Condition, ConditionStatus, Kubernetes, Resource},
+    tui::app::{App, View},
 };
 
 enum Update {
@@ -62,15 +61,19 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn request_refresh(tx: mpsc::UnboundedSender<Update>) {
+fn request_refresh(tx: mpsc::UnboundedSender<Update>, context: Option<String>) {
     tokio::spawn(async move {
-        match Kubernetes::connect().await {
+        match Kubernetes::connect(context.as_deref()).await {
             Ok(client) => match client.list_managed_resources().await {
-                Ok((resources, warnings)) => {
+                Ok(report) => {
                     let _ = tx.send(Update::Loaded {
                         context: client.context,
-                        resources,
-                        warnings,
+                        resources: report.resources,
+                        warnings: report
+                            .errors
+                            .iter()
+                            .map(|error| error.message.clone())
+                            .collect(),
                     });
                 }
                 Err(error) => {
@@ -81,7 +84,7 @@ fn request_refresh(tx: mpsc::UnboundedSender<Update>) {
                 }
             },
             Err(error) => {
-                let context = kube_context().await.ok();
+                let context = kube_context(context.as_deref()).await.ok();
                 let _ = tx.send(Update::Failed {
                     context,
                     message: format!("{error:#}"),
@@ -91,7 +94,7 @@ fn request_refresh(tx: mpsc::UnboundedSender<Update>) {
     });
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(context: Option<&str>) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -107,7 +110,7 @@ pub async fn run() -> Result<()> {
         warnings: Vec::new(),
         context: "loading kubeconfig".into(),
     };
-    request_refresh(tx.clone());
+    request_refresh(tx.clone(), context.map(str::to_owned));
 
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
@@ -140,7 +143,13 @@ pub async fn run() -> Result<()> {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
-                if handle_key(&mut app, key.code, key.modifiers, tx.clone()) {
+                if handle_key(
+                    &mut app,
+                    key.code,
+                    key.modifiers,
+                    tx.clone(),
+                    context.map(str::to_owned),
+                ) {
                     break;
                 }
             }
@@ -154,6 +163,7 @@ fn handle_key(
     key: KeyCode,
     modifiers: KeyModifiers,
     tx: mpsc::UnboundedSender<Update>,
+    context: Option<String>,
 ) -> bool {
     if app.filtering {
         match key {
@@ -191,7 +201,7 @@ fn handle_key(
         KeyCode::Char('r') if !app.loading => {
             app.loading = true;
             app.error = None;
-            request_refresh(tx);
+            request_refresh(tx, context);
         }
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),

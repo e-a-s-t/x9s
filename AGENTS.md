@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-x9s is a Rust-based, read-only Crossplane resource explorer built with Ratatui and Crossterm, integrated with Kubernetes through kube-rs. Phase 1 lists confirmed Managed Resources; see the roadmap for scope and later phases.
+x9s is a Rust-based, read-only Crossplane resource explorer with a Ratatui/Crossterm TUI and a non-interactive CLI. Both share Kubernetes and Crossplane discovery code. The CLI lists confirmed Managed Resources and reports discovery diagnostics; see the roadmap for scope and later phases.
 
 Use Devbox as the standard development environment; see [docs/development.md](docs/development.md) for setup and commands.
 
@@ -13,7 +13,7 @@ Use Devbox as the standard development environment; see [docs/development.md](do
 - Read-only in Phase 1. No in-cluster components required.
 - Respect kubeconfig, RBAC, TLS, and namespace scope.
 - Never log credentials or Secret values.
-- Keep Kubernetes API access, Crossplane interpretation, and UI separate.
+- Keep shared Kubernetes/Core logic independent of TUI and CLI presentation.
 - Prefer incremental, tested changes over premature abstraction.
 
 ## Documentation map
@@ -21,6 +21,7 @@ Use Devbox as the standard development environment; see [docs/development.md](do
 - [Development](docs/development.md): local workflow and conventions.
 - [GitHub](docs/github.md): proposed CI/CD and release process.
 - [Usage](docs/usage.md): interface and commands.
+- [Agent usage](docs/agents.md): JSON contracts, exit codes, and scripting examples.
 - [Support](docs/support.md): troubleshooting and limitations.
 - [Test cases](docs/testcases.md): verification and acceptance.
 - [Crossplane](docs/crossplane.md): resource discovery and compatibility.
@@ -30,7 +31,7 @@ Use Devbox as the standard development environment; see [docs/development.md](do
 ## Workflow
 1. Read relevant documentation and inspect existing code.
 2. Make the smallest working change; add appropriate tests.
-3. Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`.
+3. Run `devbox run fmt-check`, `devbox run lint`, and `devbox run test`.
 4. Update relevant docs; distinguish planned features from implemented ones.
 5. Report what changed, verification results, and remaining limitations.
 

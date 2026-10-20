@@ -1,6 +1,6 @@
 # Crossplane Compatibility and Resource Model
 
-**Status: Phase 1 discovery and interpretation.**
+**Status: Implemented discovery and interpretation shared by the TUI and CLI.**
 
 ## Resource families
 
@@ -28,7 +28,9 @@ Classification is necessarily conservative and depends on metadata, schema, and 
 
 ## Conditions and normalized resources
 
-The normalized resource includes API version, kind, name, optional namespace and UID, creation time, external name when present, Ready and Synced status, and the original Kubernetes object for future extensions. Condition statuses distinguish True, False, Unknown, and Missing. Missing conditions or malformed condition entries never imply success. Details show available condition reasons and messages without fabricating absent fields.
+The shared normalized resource includes API group/version, kind, plural resource name, optional namespace, name, external name when present, and Ready and Synced conditions. Condition statuses distinguish True, False, Unknown, and Missing. Missing conditions or malformed condition entries never imply success. The CLI serializes normalized safe fields rather than the original Kubernetes object; the TUI can show available detail fields without fabricating absent values.
+
+Discovery diagnostics are produced by the same discovery path used for listing. Independent API discovery and per-type listing failures do not discard successfully discovered resources; the CLI reports partial completion with exit code 3. A connectivity or initial CRD-list failure is fatal, not an empty result. See [usage](usage.md) for exit codes and [agent usage](agents.md) for the JSON contract.
 
 ## Compatibility limitations
 

@@ -29,6 +29,7 @@ Run the equivalent commands through Devbox without entering an interactive shell
 | `devbox run build` | Debug build (`cargo build`) |
 | `devbox run release` | Optimized build (`cargo build --release`) |
 | `devbox run run` | Run x9s (`cargo run`) |
+| `devbox run -- cargo run -- <args>` | Run a CLI/TUI command with arguments |
 | `devbox run test` | Run tests (`cargo test`) |
 | `devbox run fmt` | Format Rust source (`cargo fmt`) |
 | `devbox run fmt-check` | Check formatting (`cargo fmt --check`) |
@@ -77,7 +78,7 @@ Each bump reports the old and new versions and leaves changes in the working tre
 
 Ratatui is the mandatory TUI framework and Crossterm handles terminal input and events. Kubernetes access uses kube-rs with Tokio; Serde/JSON support resource data, and tracing is used for diagnostics. Add dependencies only as required by working features; do not prepopulate unused modules.
 
-Keep modules aligned to responsibilities: `kubernetes/`, `crossplane/`, `model/`, `ui/`. Prefer typed domain models at boundaries; use dynamic objects for provider resources. Add unit tests for parsers and fixture-based classification/normalization tests without cluster access, including custom Upjet groups, Crossplane v2, both resource scopes, and unrelated CRDs. Keep network operations asynchronous. Update docs in the same change as behavior.
+Keep modules aligned to responsibilities: shared discovery and normalized types live in `core/`, terminal behavior in `tui/`, and argument parsing and output formatting in `cli/`. Prefer typed domain models at boundaries; use dynamic objects for provider resources. Add unit tests for parsers and fixture-based classification/normalization tests without cluster access, including custom Upjet groups, Crossplane v2, both resource scopes, and unrelated CRDs. Keep network operations asynchronous. Update docs in the same change as behavior.
 
 For the UI, follow Ratatui's application patterns: maintain app state independently, handle input with Crossterm, compose screens from Ratatui widgets and layouts, and render in the terminal draw loop. Do not perform Kubernetes calls or other blocking work during rendering; run I/O asynchronously and deliver results back to the UI.
 
@@ -85,4 +86,4 @@ The project is intended to use GitHub for source hosting and code review. See [G
 
 ## Phase 1 behavior
 
-The application uses the current kubeconfig context, dynamically discovers APIs, and presents confirmed Managed Resources in a read-only TUI. Possible MRs are retained internally and excluded from the default list. Resource details, filtering, refresh, and condition parsing are part of the initial interface. YAML and Events views are not implemented. See [usage](usage.md), [Crossplane compatibility](crossplane.md), and [roadmap](roadmap.md).
+The application defaults to the read-only TUI and also provides non-interactive `get managed` and `diagnose` commands. Both interfaces accept a kubeconfig context override and share Core discovery and normalization. Possible MRs are retained internally and excluded from the default list. Resource details, filtering, refresh, and condition parsing are part of the TUI. YAML and Events views are not implemented. See [usage](usage.md), [agent usage](agents.md), [Crossplane compatibility](crossplane.md), and [roadmap](roadmap.md).

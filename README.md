@@ -2,7 +2,7 @@
 
 **Crossplane resources at your fingertips.**
 
-x9s is a read-only Rust terminal browser for Crossplane managed resources. It uses the current kubeconfig context, discovers Kubernetes APIs dynamically, and renders resources in a Ratatui interface. It does not install components in the cluster or modify Kubernetes resources.
+x9s is a read-only Rust Crossplane resource explorer with two interfaces: an interactive Ratatui TUI and a non-interactive CLI for scripts and agents. Both use the same Kubernetes discovery and Crossplane classification code. It does not install components in the cluster or modify Kubernetes resources.
 
 ## Quick start
 
@@ -13,6 +13,15 @@ git clone <repository>
 cd x9s
 devbox run run
 ```
+
+The default command starts the TUI. To list resources or inspect discovery from a script:
+
+```bash
+devbox run -- cargo run -- get managed --output json
+devbox run -- cargo run -- diagnose --output json
+```
+
+See [usage](docs/usage.md) for commands, output formats, context selection, and exit codes, and [agent usage](docs/agents.md) for machine-oriented examples.
 
 Or enter the environment and run the application directly:
 
@@ -29,7 +38,7 @@ Use Devbox for build and validation commands. See [development](docs/development
 
 ## Design principles
 
-- Read-only access through the active kubeconfig context.
+- Read-only access through the selected kubeconfig context.
 - Crossplane v1 and v2; discovered namespace and cluster scopes.
 - No provider-specific kind lists or required cluster-side components.
 - Conservative classification: only confirmed Managed Resources appear by default.

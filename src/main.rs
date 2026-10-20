@@ -1,9 +1,3 @@
-mod app;
-mod crossplane;
-mod kubernetes;
-mod model;
-mod ui;
-
 use std::{
     fs::{self, OpenOptions},
     io,
@@ -11,23 +5,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Parser)]
-#[command(
-    name = "x9s",
-    version = env!("CARGO_PKG_VERSION"),
-    about = "Read-only Crossplane resource explorer"
-)]
-struct Args {}
-
 #[tokio::main]
-async fn main() -> Result<()> {
-    let _ = Args::parse();
-    init_tracing()?;
-
-    ui::run().await
+async fn main() -> ExitCode {
+    let _ = init_tracing();
+    x9s::cli::run().await
 }
 
 fn init_tracing() -> Result<()> {

@@ -1,6 +1,6 @@
 # Test Cases
 
-**Status: Phase 1 unit tests and manual acceptance scenarios.**
+**Status: Core, CLI, and TUI tests and manual acceptance scenarios.**
 
 ## Automated unit tests
 
@@ -17,6 +17,9 @@ Unit tests use fixtures and do not require Kubernetes:
 - Dynamic CRD version and scope parsing.
 - Dynamic API discovery matching by group, version, kind, plural, LIST capability, and API-discovered scope.
 - Empty Kubernetes list continuation token ends pagination for both CRD discovery and resource listing.
+- CLI argument parsing, default TUI dispatch, output selection, namespace/context options, deterministic JSON serialization, table formatting, and documented exit-code mapping.
+- CLI JSON stdout contains no terminal control sequences or logs; errors use structured stderr output; empty completed discovery is success while connectivity failure is fatal.
+- Partial discovery/list failures preserve successfully discovered resources and return exit code 3.
 
 Run them with `devbox run test` or as part of `devbox run ci`.
 
@@ -37,5 +40,10 @@ These scenarios require a configured terminal and, where noted, a reachable clus
 | M09 | Enable diagnostics with `X9S_LOG_FILE` | Discovery trace is appended to the configured file while the TUI remains readable; `RUST_LOG` controls verbosity | Writable log path and reachable cluster |
 | M10 | One confirmed resource API denies or fails a list | Other confirmed resource types are still attempted; diagnostics identify the failed type and error category | Cluster with scoped RBAC or an API failure |
 | M11 | Kubernetes returns an empty `metadata.continue` value | Pagination completes instead of repeatedly requesting the same page | Unit test; no cluster required |
+| M12 | Run `get managed --output json` without a TTY | JSON data only on stdout; process exits without initializing terminal UI | Devbox |
+| M13 | One resource type fails discovery/listing while others succeed | Successful resources remain in JSON output, structured error is on stderr, exit code is 3 | Cluster with scoped RBAC or simulated API failure |
+| M14 | Kubernetes is unreachable in JSON mode | Fatal structured error on stderr and nonzero fatal exit; never an empty success | Unreachable context |
+| M15 | Completed discovery finds no instances | Empty table/JSON array and exit code 0 | Empty reachable cluster |
+| M16 | Select an alternate kubeconfig context | TUI and CLI use the requested context without changing the active kubeconfig context | Two configured contexts |
 
 Live-cluster behavior is verified only after x9s successfully connects to a cluster. Unit tests and local TUI startup do not establish Kubernetes connectivity.

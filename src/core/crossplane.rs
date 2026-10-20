@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::model::{Classification, Condition, ConditionStatus, Resource, ResourceFamily};
+use crate::core::models::{Classification, Condition, ConditionStatus, Resource, ResourceFamily};
 
 #[derive(Clone, Debug)]
 pub struct CrdInfo {
@@ -327,11 +327,19 @@ pub fn normalize(value: Value, crd: &CrdInfo) -> Resource {
             .and_then(Value::as_str)
             .unwrap_or(&crd.api_version)
             .to_owned(),
+        group: crd.group.clone(),
+        version: crd
+            .api_version
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
         kind: value
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or(&crd.kind)
             .to_owned(),
+        resource: crd.plural.clone(),
         name: metadata
             .get("name")
             .and_then(Value::as_str)
@@ -516,15 +524,15 @@ mod tests {
     #[test]
     fn upjet_v1_cluster_scoped_fixture_normalizes_and_confirms() {
         let crd: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-v1/upjet-crd.json"
+            "../../tests/fixtures/crossplane-v1/upjet-crd.json"
         ))
         .unwrap();
-        let crd = crate::kubernetes::parse_crd(&crd).unwrap();
+        let crd = crate::core::kubernetes::parse_crd(&crd).unwrap();
         assert!(!crd.namespaced);
         assert_eq!(classify_crd(&crd), Classification::ConfirmedManagedResource);
 
         let object: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-v1/upjet-mr.json"
+            "../../tests/fixtures/crossplane-v1/upjet-mr.json"
         ))
         .unwrap();
         let resource = normalize(object, &crd);
@@ -543,22 +551,22 @@ mod tests {
     fn custom_vcd_upjet_fixtures_reach_confirmed_normalized_resource_list() {
         let cases = [
             (
-                include_str!("../tests/fixtures/crossplane-vcd/vm-crd.json"),
-                include_str!("../tests/fixtures/crossplane-vcd/vm.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/vm-crd.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/vm.json"),
                 "vapp.vcd.carekube.com/v1alpha1",
                 "VM",
                 "seed-cp01",
             ),
             (
-                include_str!("../tests/fixtures/crossplane-vcd/vapp-crd.json"),
-                include_str!("../tests/fixtures/crossplane-vcd/vapp.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/vapp-crd.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/vapp.json"),
                 "vcd.vcd.carekube.com/v1alpha1",
                 "Vapp",
                 "seed",
             ),
             (
-                include_str!("../tests/fixtures/crossplane-vcd/natrule-crd.json"),
-                include_str!("../tests/fixtures/crossplane-vcd/natrule.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/natrule-crd.json"),
+                include_str!("../../tests/fixtures/crossplane-vcd/natrule.json"),
                 "nsxt.vcd.carekube.com/v1alpha1",
                 "NATRule",
                 "talos-bootstrap-cp01",
@@ -567,7 +575,7 @@ mod tests {
         let mut normalized = Vec::new();
         for (crd_json, object_json, api_version, kind, name) in cases {
             let crd_value: Value = serde_json::from_str(crd_json).unwrap();
-            let crd = crate::kubernetes::parse_crd(&crd_value).unwrap();
+            let crd = crate::core::kubernetes::parse_crd(&crd_value).unwrap();
             assert_eq!(classify_crd(&crd), Classification::ConfirmedManagedResource);
             assert_eq!(crd.api_version, api_version);
             assert!(!crd.namespaced);
@@ -576,22 +584,24 @@ mod tests {
             assert_eq!(crd.kind, kind);
             assert_eq!(normalized.last().unwrap().name, name);
         }
-        let vm_crd_value: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm-crd.json"))
-                .unwrap();
-        let vm_crd = crate::kubernetes::parse_crd(&vm_crd_value).unwrap();
+        let vm_crd_value: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/crossplane-vcd/vm-crd.json"
+        ))
+        .unwrap();
+        let vm_crd = crate::core::kubernetes::parse_crd(&vm_crd_value).unwrap();
         let mut vm_two: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/crossplane-vcd/vm.json"))
+                .unwrap();
         vm_two["metadata"]["name"] = serde_json::json!("seed-cp02");
         normalized.extend(normalize_objects([vm_two], &vm_crd));
 
         let nat_crd_value: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-vcd/natrule-crd.json"
+            "../../tests/fixtures/crossplane-vcd/natrule-crd.json"
         ))
         .unwrap();
-        let nat_crd = crate::kubernetes::parse_crd(&nat_crd_value).unwrap();
+        let nat_crd = crate::core::kubernetes::parse_crd(&nat_crd_value).unwrap();
         let mut nat_two: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-vcd/natrule.json"
+            "../../tests/fixtures/crossplane-vcd/natrule.json"
         ))
         .unwrap();
         nat_two["metadata"]["name"] = serde_json::json!("talos-bootstrap-cp02");
@@ -622,15 +632,17 @@ mod tests {
 
     #[test]
     fn equal_kinds_in_distinct_api_groups_remain_distinct_normalized_resources() {
-        let crd_vm: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm-crd.json"))
-                .unwrap();
-        let first_crd = crate::kubernetes::parse_crd(&crd_vm).unwrap();
+        let crd_vm: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/crossplane-vcd/vm-crd.json"
+        ))
+        .unwrap();
+        let first_crd = crate::core::kubernetes::parse_crd(&crd_vm).unwrap();
         let mut second_crd = first_crd.clone();
         second_crd.group = "other.vcd.carekube.com".into();
         second_crd.api_version = "other.vcd.carekube.com/v1alpha1".into();
         let first: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/crossplane-vcd/vm.json"))
+                .unwrap();
         let mut second = first.clone();
         second["apiVersion"] = serde_json::json!("other.vcd.carekube.com/v1alpha1");
         let mut normalized = normalize_objects([first], &first_crd);
@@ -643,10 +655,11 @@ mod tests {
 
     #[test]
     fn vcd_category_and_managed_definition_owner_are_valid_crossplane_evidence() {
-        let crd: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/crossplane-vcd/vm-crd.json"))
-                .unwrap();
-        let mut info = crate::kubernetes::parse_crd(&crd).unwrap();
+        let crd: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/crossplane-vcd/vm-crd.json"
+        ))
+        .unwrap();
+        let mut info = crate::core::kubernetes::parse_crd(&crd).unwrap();
         info.owner_references = serde_json::json!([{
             "apiVersion": "apiextensions.crossplane.io/v1alpha1",
             "kind": "ManagedResourceDefinition"
@@ -665,15 +678,15 @@ mod tests {
     #[test]
     fn crossplane_v2_namespaced_fixture_is_discovered_and_normalized() {
         let crd: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-v2/namespaced-crd.json"
+            "../../tests/fixtures/crossplane-v2/namespaced-crd.json"
         ))
         .unwrap();
-        let crd = crate::kubernetes::parse_crd(&crd).unwrap();
+        let crd = crate::core::kubernetes::parse_crd(&crd).unwrap();
         assert!(crd.namespaced);
         assert_eq!(classify_crd(&crd), Classification::ConfirmedManagedResource);
 
         let object: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/crossplane-v2/namespaced-mr.json"
+            "../../tests/fixtures/crossplane-v2/namespaced-mr.json"
         ))
         .unwrap();
         let resource = normalize(object, &crd);
@@ -685,10 +698,10 @@ mod tests {
     #[test]
     fn non_crossplane_crd_fixture_is_not_misclassified() {
         let value: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/non-crossplane/non-crossplane-crd.json"
+            "../../tests/fixtures/non-crossplane/non-crossplane-crd.json"
         ))
         .unwrap();
-        let crd = crate::kubernetes::parse_crd(&value).unwrap();
+        let crd = crate::core::kubernetes::parse_crd(&value).unwrap();
         assert_eq!(crd.family, ResourceFamily::Other);
         assert_eq!(classify_crd(&crd), Classification::NotManagedResource);
     }

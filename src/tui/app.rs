@@ -1,4 +1,4 @@
-use crate::model::Resource;
+use crate::core::models::Resource;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum View {
@@ -25,7 +25,8 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(index, resource)| {
-                if resource.classification != crate::model::Classification::ConfirmedManagedResource
+                if resource.classification
+                    != crate::core::models::Classification::ConfirmedManagedResource
                 {
                     return None;
                 }
@@ -90,13 +91,13 @@ impl App {
 mod tests {
     use super::*;
     use crate::{
-        crossplane::normalize,
-        model::{sort_resources, ResourceFamily},
+        core::crossplane::normalize,
+        core::models::{sort_resources, ResourceFamily},
     };
     use serde_json::json;
 
     fn resource(name: &str, namespace: Option<&str>) -> Resource {
-        let crd = crate::crossplane::CrdInfo {
+        let crd = crate::core::crossplane::CrdInfo {
             group: "s3.aws.m.upbound.io".into(),
             kind: "Bucket".into(),
             namespaced: namespace.is_some(),
