@@ -2,6 +2,10 @@
 
 **Status: proposed design; not yet implemented.**
 
+## Development environment
+
+Development tooling is managed separately from runtime architecture. Devbox pins the Rust toolchain and utilities, while Cargo manages application dependencies and package metadata. `Cargo.toml` is the version source of truth; see [development](development.md) for environment and version commands.
+
 ## Layers
 
 1. **Kubernetes adapter:** kube-rs client, API discovery, list/watch, error handling; uses kubeconfig and API server permissions.

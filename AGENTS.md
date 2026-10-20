@@ -3,6 +3,8 @@
 ## Project
 x9s is a Rust-based Crossplane resource explorer built with Ratatui and Crossterm, integrated with Kubernetes through kube-rs. The scaffold is not yet implemented; see the roadmap for planned phases.
 
+Use Devbox as the standard development environment; see [docs/development.md](docs/development.md) for setup and commands.
+
 ## Rules
 - Ratatui is the mandatory TUI framework; use Crossterm for terminal input and events.
 - Use Rust, kube-rs, Tokio, Serde, and tracing as the project develops.

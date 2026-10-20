@@ -2,21 +2,38 @@
 
 **Crossplane resources at your fingertips.**
 
-x9s is a planned Rust-based Crossplane resource explorer for inspecting resources and their reconciliation state. Its terminal UI will use Ratatui with Crossterm, and it will use Kubernetes discovery through kube-rs rather than generated provider-specific clients. GitHub is the intended development and release platform.
+x9s is a Rust-based Crossplane resource explorer scaffold. Its planned terminal UI will use Ratatui and Crossterm, with Kubernetes discovery through kube-rs rather than generated provider-specific clients. GitHub is the intended development and release platform.
 
 ## Status
 
-**Starter scaffold only.** The initial executable is a placeholder; Kubernetes connectivity and TUI are not implemented yet.
+**Starter scaffold only.** Kubernetes connectivity and the TUI are not implemented yet. The executable supports `--version`.
 
-## Start development
+## Start developing
+
+Install [Devbox](https://www.jetify.com/docs/devbox/installing_devbox/) for your platform, then enter the project environment. Devbox supplies the pinned Rust toolchain and development utilities declared by this repository.
 
 ```bash
+git clone <repository>
+cd x9s
+
+devbox shell
+
+cargo build
 cargo run
 ```
 
-Read [AGENTS.md](AGENTS.md), the [documentation index](docs/README.md), and the [roadmap](docs/roadmap.md). Start with Phase 1.
+Or use the project commands:
 
-When releases are available, the planned Homebrew distribution path is the [`e-a-s-t/homebrew-tap`](https://github.com/e-a-s-t/homebrew-tap) tap. See the [GitHub delivery plan](docs/github.md).
+```bash
+devbox run build
+devbox run test
+devbox run lint
+devbox run ci
+```
+
+Read [development instructions](docs/development.md) for setup, toolchain updates, and version management. See the [documentation index](docs/README.md) and [roadmap](docs/roadmap.md) for project status.
+
+The planned Homebrew distribution path is the [`e-a-s-t/homebrew-tap`](https://github.com/e-a-s-t/homebrew-tap) tap. The formula may not yet be available; release details are in the [GitHub delivery plan](docs/github.md).
 
 ## Design principles
 

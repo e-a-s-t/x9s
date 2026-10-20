@@ -1,4 +1,5 @@
 /target/
+/.devbox/
 .idea/
 .vscode/
 .DS_Store
