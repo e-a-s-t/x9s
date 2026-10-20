@@ -2,7 +2,7 @@
 
 **Crossplane resources at your fingertips.**
 
-x9s is a planned Rust terminal UI for inspecting Crossplane resources and their reconciliation state. Inspired by K9s, it will use Kubernetes discovery rather than generated provider-specific clients.
+x9s is a planned Rust-based Crossplane resource explorer for inspecting resources and their reconciliation state. Its terminal UI will use Ratatui with Crossterm, and it will use Kubernetes discovery through kube-rs rather than generated provider-specific clients. GitHub is the intended development and release platform.
 
 ## Status
 
@@ -15,6 +15,8 @@ cargo run
 ```
 
 Read [AGENTS.md](AGENTS.md), the [documentation index](docs/README.md), and the [roadmap](docs/roadmap.md). Start with Phase 1.
+
+When releases are available, the planned Homebrew distribution path is the [`e-a-s-t/homebrew-tap`](https://github.com/e-a-s-t/homebrew-tap) tap. See the [GitHub delivery plan](docs/github.md).
 
 ## Design principles
 

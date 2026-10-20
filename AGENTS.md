@@ -1,10 +1,11 @@
 # AGENTS.md
 
 ## Project
-x9s is a Rust terminal UI for exploring and troubleshooting Crossplane resources. It is inspired by K9s, but focuses on Crossplane's resource models and reconciliation lifecycle.
+x9s is a Rust-based Crossplane resource explorer built with Ratatui and Crossterm, integrated with Kubernetes through kube-rs. The scaffold is not yet implemented; see the roadmap for planned phases.
 
 ## Rules
-- Rust, Ratatui, Crossterm, kube-rs, Tokio, Serde, tracing.
+- Ratatui is the mandatory TUI framework; use Crossterm for terminal input and events.
+- Use Rust, kube-rs, Tokio, Serde, and tracing as the project develops.
 - Discover API resources dynamically; never hardcode provider kinds.
 - Support Crossplane v1 and v2, namespaced and cluster-scoped resources.
 - Read-only in Phase 1. No in-cluster components required.
@@ -16,7 +17,7 @@ x9s is a Rust terminal UI for exploring and troubleshooting Crossplane resources
 ## Documentation map
 - [Architecture](docs/architecture.md): design and component boundaries.
 - [Development](docs/development.md): local workflow and conventions.
-- [Azure DevOps](docs/ado.md): CI/CD intentions.
+- [GitHub](docs/github.md): proposed CI/CD and release process.
 - [Usage](docs/usage.md): interface and commands.
 - [Support](docs/support.md): troubleshooting and limitations.
 - [Test cases](docs/testcases.md): verification and acceptance.
@@ -31,4 +32,4 @@ x9s is a Rust terminal UI for exploring and troubleshooting Crossplane resources
 4. Update relevant docs; distinguish planned features from implemented ones.
 5. Report what changed, verification results, and remaining limitations.
 
-Do not implement future phases without explicit instruction. Do not assume an Azure DevOps organization, service connection, or secret already exists.
+Do not implement future phases without explicit instruction. Keep plans distinct from implemented functionality.

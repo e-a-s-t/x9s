@@ -4,7 +4,7 @@
 | --- | --- |
 | [architecture.md](architecture.md) | Components and design decisions |
 | [development.md](development.md) | Developer setup and conventions |
-| [ado.md](ado.md) | Azure DevOps build and release design |
+| [github.md](github.md) | GitHub CI, releases, and Homebrew delivery plan |
 | [usage.md](usage.md) | Planned user experience and commands |
 | [support.md](support.md) | Diagnostics and troubleshooting |
 | [testcases.md](testcases.md) | Unit, integration, and acceptance tests |

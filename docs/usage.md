@@ -1,8 +1,10 @@
 # Usage
 
-**Status: planned UX. Only a placeholder CLI is currently available.**
+**Status: planned UX. Only a placeholder CLI is currently available; the Ratatui interface is not implemented.**
 
 Eventually, running `x9s` will open the terminal interface using the current kubeconfig context. No in-cluster installation is required.
+
+The planned interface uses Ratatui for rendering and Crossterm for keyboard input and terminal events. UI rendering remains separate from Kubernetes requests; asynchronous results update the view without blocking interaction. The interface is planned and these commands are not available in the current scaffold.
 
 ## Planned commands
 

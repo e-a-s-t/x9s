@@ -16,7 +16,7 @@ Inspect resource `status.conditions`, Kubernetes Events, and the relevant provid
 
 ## Reporting bugs
 
-Include x9s version, OS/terminal, Kubernetes version, Crossplane version, affected API group/kind, steps to reproduce, and sanitized logs. **Remove tokens, kubeconfigs, Secret values, and private infrastructure identifiers before sharing.**
+Report bugs and request features through GitHub Issues. Include x9s version, OS/terminal, Kubernetes version, Crossplane version, affected API group/kind, steps to reproduce, and sanitized logs. **Remove tokens, kubeconfigs, Secret values, and private infrastructure identifiers before sharing.**
 
 ## Current limitations
 

@@ -7,9 +7,11 @@
 1. **Kubernetes adapter:** kube-rs client, API discovery, list/watch, error handling; uses kubeconfig and API server permissions.
 2. **Crossplane interpretation:** classify discovered resources, parse conditions, extract explicit references and relationships.
 3. **Domain model:** resource identity (G/V/K, scope, namespace, name, UID), conditions, metadata, and related objects.
-4. **Terminal UI:** Ratatui/Crossterm navigation, filtering, tables, details, YAML and events.
+4. **Terminal UI:** Ratatui navigation, filtering, tables, details, YAML and events, with Crossterm handling terminal input and events.
 
-Tokio tasks must keep network requests off the UI rendering path. Use bounded updates and cancellation when changing views or contexts. Never assume that every resource has `status.conditions`.
+Ratatui is the required TUI framework. Follow its application conventions: keep application state separate from rendering, use widgets and layouts for views, and render through a terminal draw loop. Crossterm provides terminal input and event handling. Keep Kubernetes communication and Crossplane interpretation outside UI components.
+
+Tokio tasks must keep Kubernetes requests off the UI rendering path so terminal input and redraws remain responsive. Send results back to the application through bounded asynchronous updates and cancel obsolete work when changing views or contexts. Never assume that every resource has `status.conditions`.
 
 ## Discovery and scope
 
@@ -29,3 +31,7 @@ No cluster installation. No mutation in Phase 1. Do not print Secret payloads or
 - **D002:** kube-rs dynamic APIs for arbitrary provider types.
 - **D003:** Read-only initial release.
 - **D004:** Crossplane interpretation is separate from Kubernetes transport and UI.
+
+## Terminal UI reference
+
+Use the [official Ratatui documentation](https://ratatui.rs/) for framework guidance and current conventions. Do not introduce another TUI framework or an extra UI abstraction without a concrete need.
