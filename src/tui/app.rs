@@ -56,6 +56,8 @@ pub struct App {
     pub warnings: Vec<String>,
     pub events: Vec<Value>,
     pub context: String,
+    pub cluster: Option<String>,
+    pub user: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +108,8 @@ impl App {
             warnings: Vec::new(),
             events: Vec::new(),
             context,
+            cluster: None,
+            user: None,
         }
     }
 

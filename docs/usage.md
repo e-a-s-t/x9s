@@ -58,6 +58,8 @@ The file is append-only. When configured, the default log level is `info`; `RUST
 
 ## TUI navigation
 
+The TUI uses a persistent, responsive header with kubeconfig context details, shortcuts supported by the current view, and an X9s wordmark on wide terminals. Kubernetes version and metrics show `n/a` when not already available; the header does not poll the cluster for them. Resource tables keep Ready and Synced visible on compact terminals, while namespace and age are hidden to preserve room for names.
+
 The initial screen lists discovered ProviderConfigs, All Providers, Unassigned resources, and Unresolved ProviderConfig references. ProviderConfig identities include API group, kind, namespace when applicable, and name. Counts include unique managed-resource instances. Selecting a ProviderConfig shows its associated managed resources; unresolved resources remain visible in All Providers and under Unresolved ProviderConfig. All Providers includes discovered infrastructure instances and exact referenced targets, not CRD definitions or Crossplane internals. Use `:system` for Crossplane diagnostic objects.
 
 | Key | Action |

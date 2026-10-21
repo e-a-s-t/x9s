@@ -8,8 +8,8 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Terminal,
@@ -171,6 +171,7 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     warnings,
                 } => {
                     app.context = context;
+                    (app.cluster, app.user) = context_metadata(&app.context);
                     kube_client = Some(client);
                     app.replace_resources(resources, graph, warnings);
                     app.loading = false;
@@ -187,6 +188,7 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                 Update::Failed { context, message } => {
                     if let Some(context) = context {
                         app.context = context;
+                        (app.cluster, app.user) = context_metadata(&app.context);
                     }
                     app.loading = false;
                     app.error = Some(message);
@@ -215,6 +217,20 @@ pub async fn run(context: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn context_metadata(context_name: &str) -> (Option<String>, Option<String>) {
+    let Ok(config) = kube::config::Kubeconfig::read() else {
+        return (None, None);
+    };
+    let selected = config
+        .contexts
+        .iter()
+        .find(|entry| entry.name == context_name);
+    selected
+        .and_then(|entry| entry.context.as_ref())
+        .map(|context| (Some(context.cluster.clone()), context.user.clone()))
+        .unwrap_or((None, None))
 }
 
 fn handle_key(
@@ -523,32 +539,31 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         ),
         area,
     );
-    if area.width < 40 || area.height < 8 {
-        frame.render_widget(Paragraph::new("Resize terminal to at least 40x8"), area);
+    if area.width < 1 || area.height < 1 {
         return;
     }
+    if area.height < 4 {
+        frame.render_widget(Paragraph::new("Resize terminal"), area);
+        return;
+    }
+    let header_height = if full_logo_fits(area) {
+        X9S_LOGO.len() as u16
+    } else if area.width >= 120 {
+        6
+    } else if area.width >= 80 {
+        4
+    } else {
+        2
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
+            Constraint::Length(header_height),
+            Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(area);
-    let context = format!(
-        " Context: {}   {}",
-        app.context,
-        match app.view {
-            View::Providers => "ProviderConfigs",
-            View::Resources => "Resources",
-            View::System => "System",
-            _ => "Resource",
-        }
-    );
-    frame.render_widget(
-        Paragraph::new(context).style(Style::default().fg(K9sDark::color(ThemeColor::Accent))),
-        chunks[0],
-    );
+    draw_header(frame, app, chunks[0]);
     match app.view {
         View::Providers => draw_providers(frame, app, chunks[1]),
         View::Resources => draw_resources(frame, app, chunks[1]),
@@ -572,15 +587,337 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             "Partial discovery: {}  [/] Filter [r] Refresh [?] Help [q] Quit",
             app.warnings[0]
         )
-    } else if app.view == View::Providers {
-        "Enter open  / filter  : command  r refresh  q quit".into()
     } else {
-        "j/k move  Enter details  p providers  / filter  t tree/flat  r refresh  Esc back".into()
+        let mode = match app.view {
+            View::Providers => "PROVIDERS",
+            View::Resources => {
+                if app.tree {
+                    "TREE"
+                } else {
+                    "FLAT"
+                }
+            }
+            View::System => "SYSTEM",
+            View::Details => "DETAILS",
+            View::Yaml => "YAML",
+            View::Events => "EVENTS",
+            View::Describe => "DESCRIBE",
+            View::Help => "HELP",
+        };
+        let filter = if app.filter.is_empty() {
+            String::new()
+        } else {
+            format!("  Filter: {}", app.filter)
+        };
+        format!("{mode}{filter}")
+    };
+    let footer_color = if app.error.is_some() {
+        ThemeColor::Error
+    } else if app.loading || !app.warnings.is_empty() {
+        ThemeColor::Warning
+    } else {
+        ThemeColor::Muted
     };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(footer).style(Style::default().fg(K9sDark::color(footer_color))),
         chunks[2],
     );
+}
+
+#[derive(Clone, Copy)]
+struct Shortcut {
+    key: &'static str,
+    description: &'static str,
+}
+
+fn shortcuts(view: View) -> &'static [Shortcut] {
+    use Shortcut as S;
+    match view {
+        View::Providers => &[
+            S {
+                key: "<enter>",
+                description: "Open",
+            },
+            S {
+                key: "</>",
+                description: "Filter",
+            },
+            S {
+                key: "<r>",
+                description: "Refresh",
+            },
+            S {
+                key: "<:>",
+                description: "Commands",
+            },
+            S {
+                key: "<?>",
+                description: "Help",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Resources | View::System => &[
+            S {
+                key: "<j/k>",
+                description: "Navigate",
+            },
+            S {
+                key: "<enter>",
+                description: "Details",
+            },
+            S {
+                key: "<h/l>",
+                description: "Collapse/Expand",
+            },
+            S {
+                key: "<p>",
+                description: "Providers",
+            },
+            S {
+                key: "<t>",
+                description: "Tree/Flat",
+            },
+            S {
+                key: "</>",
+                description: "Filter",
+            },
+            S {
+                key: "<y>",
+                description: "YAML",
+            },
+            S {
+                key: "<e>",
+                description: "Events",
+            },
+            S {
+                key: "<r>",
+                description: "Refresh",
+            },
+            S {
+                key: "<?>",
+                description: "Help",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Details => &[
+            S {
+                key: "<esc>",
+                description: "Back",
+            },
+            S {
+                key: "<j/k>",
+                description: "Related",
+            },
+            S {
+                key: "<enter>",
+                description: "Open related",
+            },
+            S {
+                key: "<y>",
+                description: "YAML",
+            },
+            S {
+                key: "<e>",
+                description: "Events",
+            },
+            S {
+                key: "<d>",
+                description: "Describe",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Yaml | View::Describe | View::Events => &[
+            S {
+                key: "<esc>",
+                description: "Back",
+            },
+            S {
+                key: "<j/k>",
+                description: "Scroll",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Help => &[
+            S {
+                key: "<esc>",
+                description: "Back",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+    }
+}
+
+const X9S_LOGO: [&str; 8] = [
+    r"$$\   $$\  $$$$$$\",
+    r"$$ |  $$ |$$  __$$\",
+    r"\$$\ $$  |$$ /  $$ | $$$$$$$\",
+    r" \$$$$  / \$$$$$$$ |$$  _____|",
+    r" $$  $$<   \____$$ |\$$$$$$\",
+    r"$$  /\$$\ $$\   $$ | \____$$\",
+    r"$$ /  $$ |\$$$$$$  |$$$$$$$  |",
+    r"\__|  \__| \______/ \_______/",
+];
+
+fn x9s_logo_width() -> usize {
+    X9S_LOGO
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn full_logo_fits(area: ratatui::layout::Rect) -> bool {
+    let logo_column_width = area.width as usize * 20 / 100;
+    logo_column_width >= x9s_logo_width() && area.height >= X9S_LOGO.len() as u16 + 2
+}
+
+fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    let wide = area.height >= X9S_LOGO.len() as u16
+        && (area.width as usize * 20 / 100) >= x9s_logo_width();
+    let medium = area.width >= 80;
+    let columns = if wide {
+        Layout::horizontal([
+            Constraint::Percentage(32),
+            Constraint::Percentage(48),
+            Constraint::Percentage(20),
+        ])
+        .split(area)
+    } else if medium {
+        Layout::horizontal([
+            Constraint::Percentage(40),
+            Constraint::Percentage(48),
+            Constraint::Percentage(12),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
+    let context_lines = if wide || medium {
+        vec![
+            ("Context:", app.context.as_str()),
+            ("Cluster:", app.cluster.as_deref().unwrap_or("n/a")),
+            ("User:", app.user.as_deref().unwrap_or("n/a")),
+        ]
+    } else if area.width < 40 {
+        vec![("Ctx:", app.context.as_str())]
+    } else {
+        vec![("Context:", app.context.as_str())]
+    };
+    let label_width: usize = if area.width < 40 { 4 } else { 9 };
+    let value_width = columns[0].width.saturating_sub((label_width + 1) as u16) as usize;
+    let context: Vec<Line> = context_lines
+        .into_iter()
+        .map(|(label, value)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{label:<label_width$} "),
+                    Style::default().fg(K9sDark::color(ThemeColor::Accent)),
+                ),
+                Span::styled(
+                    truncate(value, value_width),
+                    Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(context).wrap(Wrap { trim: true }),
+        columns[0],
+    );
+    let all = shortcuts(app.view);
+    let max = if wide {
+        all.len()
+    } else if medium {
+        all.len().min(6)
+    } else {
+        all.len().min(2)
+    };
+    let split = if wide {
+        3
+    } else if medium {
+        2
+    } else {
+        1
+    };
+    let lines = (0..split)
+        .map(|col| {
+            let spans = (col..max)
+                .step_by(split)
+                .flat_map(|i| {
+                    let item = all[i];
+                    [
+                        Span::styled(
+                            item.key,
+                            Style::default().fg(K9sDark::color(ThemeColor::Shortcut)),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            item.description,
+                            Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+                        ),
+                        Span::raw(if wide { "   " } else { "  " }),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), columns[1]);
+    if wide {
+        let logo_width = x9s_logo_width() as u16;
+        let logo_x = columns[2].right().saturating_sub(logo_width);
+        for (index, line) in X9S_LOGO.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(*line).style(Style::default().fg(K9sDark::color(
+                    if index % 2 == 0 {
+                        ThemeColor::LogoPrimary
+                    } else {
+                        ThemeColor::LogoSecondary
+                    },
+                ))),
+                Rect::new(logo_x, area.y + index as u16, logo_width, 1),
+            );
+        }
+    } else if medium {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "X9s",
+                Style::default()
+                    .fg(K9sDark::color(ThemeColor::LogoPrimary))
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .alignment(ratatui::layout::Alignment::Right),
+            columns[2],
+        );
+    }
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if value.chars().count() <= width {
+        return value.to_owned();
+    }
+    if width == 1 {
+        return "…".into();
+    }
+    format!("{}…", value.chars().take(width - 1).collect::<String>())
 }
 
 fn set_tree_mode(app: &mut App, tree: bool) {
@@ -600,6 +937,7 @@ fn set_tree_mode(app: &mut App, tree: bool) {
 fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let entries = app.visible_provider_entries();
     let mut rows = Vec::new();
+    let count_width = ((area.width as usize) * if area.width < 80 { 16 } else { 15 }) / 100;
     for entry in &entries {
         let id = match entry {
             ProviderEntry::All => {
@@ -613,12 +951,14 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                     .map(Resource::id)
                     .collect::<std::collections::HashSet<_>>()
                     .len();
-                rows.push(Row::new(vec![
-                    Cell::from("All Providers"),
-                    Cell::from("-"),
-                    Cell::from(count.to_string()),
-                    Cell::from("-"),
-                ]));
+                rows.push(provider_row(
+                    "All Providers",
+                    "-",
+                    count,
+                    "Missing",
+                    area.width < 80,
+                    count_width,
+                ));
                 continue;
             }
             ProviderEntry::Unassigned => {
@@ -637,12 +977,14 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                     .map(Resource::id)
                     .collect::<std::collections::HashSet<_>>()
                     .len();
-                rows.push(Row::new(vec![
-                    Cell::from("Unassigned"),
-                    Cell::from("-"),
-                    Cell::from(count.to_string()),
-                    Cell::from("Unknown"),
-                ]));
+                rows.push(provider_row(
+                    "Unassigned",
+                    "-",
+                    count,
+                    "Unknown",
+                    area.width < 80,
+                    count_width,
+                ));
                 continue;
             }
             ProviderEntry::Unresolved => {
@@ -662,12 +1004,14 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                     .map(Resource::id)
                     .collect::<std::collections::HashSet<_>>()
                     .len();
-                rows.push(Row::new(vec![
-                    Cell::from("Unresolved ProviderConfig"),
-                    Cell::from("-"),
-                    Cell::from(count.to_string()),
-                    Cell::from(if count == 0 { "Healthy" } else { "Degraded" }),
-                ]));
+                rows.push(provider_row(
+                    "Unresolved ProviderConfig",
+                    "-",
+                    count,
+                    if count == 0 { "Healthy" } else { "Degraded" },
+                    area.width < 80,
+                    count_width,
+                ));
                 continue;
             }
             ProviderEntry::Config(id) => id,
@@ -690,50 +1034,91 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
             })
             .unwrap_or("-");
         let count = app.provider_resource_count(id);
-        rows.push(Row::new(vec![
-            Cell::from(label),
-            Cell::from(provider.to_owned()),
-            Cell::from(count.to_string()),
-            Cell::from(
-                resource
-                    .map(|item| item.ready.status.label())
-                    .unwrap_or("Missing"),
-            ),
-        ]));
+        rows.push(provider_row(
+            &label,
+            provider,
+            count,
+            resource
+                .map(|item| item.ready.status.label())
+                .unwrap_or("Missing"),
+            area.width < 80,
+            count_width,
+        ));
     }
-    let table = Table::new(
-        rows,
-        [
+    let widths = if area.width < 80 {
+        vec![
+            Constraint::Percentage(68),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
+        ]
+    } else {
+        vec![
             Constraint::Percentage(40),
             Constraint::Percentage(30),
             Constraint::Percentage(15),
             Constraint::Percentage(15),
-        ],
-    )
-    .header(
-        Row::new(["NAME", "PROVIDER", "RESOURCES", "STATUS"]).style(
+        ]
+    };
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(if area.width < 80 {
+                vec!["NAME", "RESOURCES", "STATUS"]
+            } else {
+                vec!["NAME", "PROVIDER", "RESOURCES", "STATUS"]
+            })
+            .style(
+                Style::default()
+                    .fg(K9sDark::color(ThemeColor::Heading))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(
+            Block::default()
+                .title(format!(" PROVIDER CONFIGS [{}] ", app.providers.len()))
+                .borders(Borders::NONE),
+        )
+        .row_highlight_style(
             Style::default()
-                .fg(K9sDark::color(ThemeColor::Heading))
+                .bg(K9sDark::color(ThemeColor::Selection))
+                .fg(K9sDark::color(ThemeColor::SelectionForeground))
                 .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .title(format!(" PROVIDER CONFIGS [{}] ", app.providers.len()))
-            .borders(Borders::NONE),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(K9sDark::color(ThemeColor::Selection))
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("▶ ");
+        )
+        .highlight_symbol("▶ ");
     frame.render_stateful_widget(
         table,
         area,
         &mut TableState::default().with_selected((!entries.is_empty()).then_some(app.selected)),
     );
+}
+
+fn provider_row(
+    name: &str,
+    provider: &str,
+    count: usize,
+    status: &str,
+    narrow: bool,
+    count_width: usize,
+) -> Row<'static> {
+    let mut cells = vec![Cell::from(name.to_owned())];
+    if !narrow {
+        cells.push(Cell::from(provider.to_owned()));
+    }
+    cells.push(Cell::from(format!("{count:>count_width$}")));
+    cells.push(Cell::from(status_span(status)));
+    Row::new(cells)
+}
+
+fn status_span(status: &str) -> Span<'static> {
+    let color = match status {
+        "True" | "Healthy" => ThemeColor::Healthy,
+        "False" | "Degraded" => ThemeColor::Error,
+        "Unknown" => ThemeColor::Warning,
+        _ => ThemeColor::Muted,
+    };
+    Span::styled(
+        status.to_owned(),
+        Style::default().fg(K9sDark::color(color)),
+    )
 }
 
 fn draw_resources(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
@@ -745,6 +1130,8 @@ fn draw_resources(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
         );
         return;
     }
+    let compact = area.width < 120;
+    let narrow = area.width < 80;
     let rows = tree_rows.iter().filter_map(|tree_row| {
         app.resources.get(tree_row.index).map(|resource| {
             let id = resource.id();
@@ -771,13 +1158,21 @@ fn draw_resources(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                 String::new()
             };
             let name = format!("{branch}{marker}{}/{}", resource.kind, resource.name);
-            Row::new(vec![
-                Cell::from(name),
-                Cell::from(resource.namespace.clone().unwrap_or_else(|| "-".into())),
-                Cell::from(condition_span(&resource.ready)),
-                Cell::from(condition_span(&resource.synced)),
-                Cell::from(age(resource)),
-            ])
+            let mut cells = vec![Cell::from(name)];
+            if !compact {
+                cells.push(Cell::from(
+                    resource.namespace.clone().unwrap_or_else(|| "-".into()),
+                ));
+            }
+            cells.push(Cell::from(condition_span(&resource.ready)));
+            cells.push(Cell::from(condition_span(&resource.synced)));
+            if !compact {
+                cells.push(Cell::from(age(resource)));
+            }
+            if narrow {
+                cells.truncate(3);
+            }
+            Row::new(cells)
         })
     });
     let title = if app.view == View::System {
@@ -792,31 +1187,48 @@ fn draw_resources(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
             .map(|provider| format!(" RESOURCES ({}) ", format_resource_id(provider)))
             .unwrap_or_else(|| " RESOURCES (ALL PROVIDERS) ".into())
     };
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(54),
+    let widths = if narrow {
+        vec![
+            Constraint::Percentage(72),
             Constraint::Percentage(14),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
+            Constraint::Percentage(14),
+        ]
+    } else if compact {
+        vec![
+            Constraint::Percentage(68),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(50),
+            Constraint::Percentage(14),
             Constraint::Percentage(12),
-        ],
-    )
-    .header(
-        Row::new(["RESOURCE", "NAMESPACE", "READY", "SYNCED", "AGE"]).style(
+            Constraint::Percentage(12),
+            Constraint::Percentage(12),
+        ]
+    };
+    let headings = if compact {
+        vec!["RESOURCE", "READY", "SYNCED"]
+    } else {
+        vec!["RESOURCE", "NAMESPACE", "READY", "SYNCED", "AGE"]
+    };
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(headings).style(
+                Style::default()
+                    .fg(K9sDark::color(ThemeColor::Heading))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(Block::default().title(title).borders(Borders::NONE))
+        .row_highlight_style(
             Style::default()
-                .fg(K9sDark::color(ThemeColor::Heading))
+                .bg(K9sDark::color(ThemeColor::Selection))
+                .fg(K9sDark::color(ThemeColor::SelectionForeground))
                 .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(Block::default().title(title).borders(Borders::NONE))
-    .row_highlight_style(
-        Style::default()
-            .bg(K9sDark::color(ThemeColor::Selection))
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("▶ ");
+        )
+        .highlight_symbol("▶ ");
     frame.render_stateful_widget(
         table,
         area,
@@ -832,38 +1244,60 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout
         );
         return;
     };
+    let provider_config = resource
+        .original
+        .pointer("/spec/providerConfigRef/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
     let mut lines = vec![
-        Line::from(format!("Resource: {}/{}", resource.kind, resource.name)),
-        Line::from(format!("API:       {}", resource.api_version)),
-        Line::from(format!("Group:     {}", resource.group)),
-        Line::from(format!(
-            "Namespace: {}",
-            resource.namespace.as_deref().unwrap_or("-")
+        Line::from(Span::styled(
+            "RESOURCE DETAILS",
+            Style::default()
+                .fg(K9sDark::color(ThemeColor::Heading))
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!(
-            "UID:       {}",
-            resource.uid.as_deref().unwrap_or("-")
-        )),
-        Line::from(format!(
-            "External:  {}",
-            resource.external_name.as_deref().unwrap_or("-")
-        )),
+        detail_pair("Name", &resource.name),
+        detail_pair("Kind", &resource.kind),
+        detail_pair("Namespace", resource.namespace.as_deref().unwrap_or("-")),
+        detail_pair("ProviderConfig", provider_config),
+        detail_pair(
+            "External Name",
+            resource.external_name.as_deref().unwrap_or("-"),
+        ),
+        detail_pair("API", &resource.api_version),
+        detail_pair("UID", resource.uid.as_deref().unwrap_or("-")),
         Line::from(""),
-        Line::from("CONDITIONS"),
+        Line::from(Span::styled(
+            "CONDITIONS",
+            Style::default()
+                .fg(K9sDark::color(ThemeColor::Heading))
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     for (name, condition) in [("Ready", &resource.ready), ("Synced", &resource.synced)] {
-        lines.push(Line::from(format!(
-            "{name}: {}{}",
-            condition.status.label(),
-            condition
-                .reason
-                .as_ref()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default()
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{name:<16}"),
+                Style::default().fg(K9sDark::color(ThemeColor::Accent)),
+            ),
+            condition_span(condition),
+            Span::styled(
+                condition
+                    .reason
+                    .as_ref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default(),
+                Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("RELATIONSHIPS"));
+    lines.push(Line::from(Span::styled(
+        "RELATIONSHIPS",
+        Style::default()
+            .fg(K9sDark::color(ThemeColor::Heading))
+            .add_modifier(Modifier::BOLD),
+    )));
     for edge in app
         .graph
         .relationships
@@ -900,19 +1334,41 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout
                 }
             })
             .unwrap_or("  ");
-        lines.push(Line::from(format!(
-            "{marker}{}: {other}",
-            edge.relation.label()
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                marker,
+                Style::default().fg(K9sDark::color(ThemeColor::Shortcut)),
+            ),
+            Span::styled(
+                format!("{:<16}", edge.relation.label()),
+                Style::default().fg(K9sDark::color(ThemeColor::Accent)),
+            ),
+            Span::styled(
+                other,
+                Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("y YAML   e Events   d Describe   Esc Back"));
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::NONE))
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn detail_pair(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<16}"),
+            Style::default().fg(K9sDark::color(ThemeColor::Accent)),
+        ),
+        Span::styled(
+            value.to_owned(),
+            Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+        ),
+    ])
 }
 
 fn draw_yaml(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
@@ -1101,13 +1557,33 @@ fn tree_parent(app: &App, id: &crate::core::ResourceId) -> Option<crate::core::R
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitized_yaml, set_tree_mode};
+    use super::{draw, sanitized_yaml, set_tree_mode};
     use crate::core::{
         crossplane::{normalize, CrdInfo},
         models::{Resource, ResourceFamily},
         relationships::RelationshipGraph,
     };
+    use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
+
+    fn rendered(
+        app: &crate::tui::app::App,
+        width: u16,
+        height: u16,
+    ) -> (String, Terminal<TestBackend>) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            output.push('\n');
+        }
+        (output, terminal)
+    }
 
     fn test_resource(name: &str) -> Resource {
         let crd = CrdInfo {
@@ -1155,5 +1631,117 @@ mod tests {
         let selected = app.selected_resource().unwrap().id();
         set_tree_mode(&mut app, false);
         assert_eq!(app.selected_resource().unwrap().id(), selected);
+    }
+
+    #[test]
+    fn header_shows_context_legend_and_right_aligned_x9s_logo() {
+        assert_eq!(
+            super::X9S_LOGO,
+            [
+                r"$$\   $$\  $$$$$$\",
+                r"$$ |  $$ |$$  __$$\",
+                r"\$$\ $$  |$$ /  $$ | $$$$$$$\",
+                r" \$$$$  / \$$$$$$$ |$$  _____|",
+                r" $$  $$<   \____$$ |\$$$$$$\",
+                r"$$  /\$$\ $$\   $$ | \____$$\",
+                r"$$ /  $$ |\$$$$$$  |$$$$$$$  |",
+                r"\__|  \__| \______/ \_______/",
+            ]
+        );
+        let mut app = crate::tui::app::App::new("kind-local-dev".into());
+        app.cluster = Some("kind-local-dev".into());
+        app.user = Some("local-user".into());
+        let (output, _) = rendered(&app, 160, 45);
+        assert!(output.contains("Context:"));
+        assert!(output.contains("kind-local-dev"));
+        assert!(output.contains("Cluster:"));
+        assert!(output.contains("User:"));
+        assert!(!output.contains("K8s Rev:"));
+        assert!(!output.contains("CPU:"));
+        assert!(!output.contains("MEM:"));
+        assert!(!output.contains("n/a"));
+        assert!(output.contains("<enter>"));
+        assert!(output.contains("Providers"));
+        let logo_width = super::x9s_logo_width();
+        let logo_x = 160 - logo_width;
+        for (row, art) in super::X9S_LOGO.iter().enumerate() {
+            let rendered_row = output.lines().nth(row).unwrap();
+            let block_row = &rendered_row[logo_x..logo_x + logo_width];
+            assert_eq!(block_row, format!("{art:<logo_width$}"), "line {row}");
+            assert!(logo_x >= 128, "logo must stay in its own header section");
+        }
+        assert!(super::X9S_LOGO[3].starts_with(' '));
+        assert!(output.lines().nth(8).unwrap().contains("PROVIDER CONFIGS"));
+        let (minimum_wide, _) = rendered(&app, 150, 10);
+        assert!(minimum_wide.contains(super::X9S_LOGO[0]));
+        let (too_narrow, _) = rendered(&app, 149, 10);
+        assert!(!too_narrow.contains(super::X9S_LOGO[0]));
+    }
+
+    #[test]
+    fn shortcut_legend_changes_with_active_view_and_narrow_layout_hides_logo() {
+        let mut app = crate::tui::app::App::new("a-very-long-context-name-for-truncation".into());
+        let (provider_output, _) = rendered(&app, 80, 24);
+        assert!(provider_output.contains("<enter>"));
+        assert!(provider_output.contains("Filter"));
+        assert!(provider_output.contains("X9s"));
+        app.view = crate::tui::app::View::Resources;
+        let (resource_output, _) = rendered(&app, 160, 45);
+        assert!(resource_output.contains("Collapse/Expand"));
+        assert!(resource_output.contains("Tree/Flat"));
+        let (narrow_output, _) = rendered(&app, 60, 24);
+        assert!(!narrow_output.contains("X9s"));
+        let (short_output, _) = rendered(&app, 160, 9);
+        assert!(!short_output.contains("$$\\   $$\\"));
+    }
+
+    #[test]
+    fn rendering_handles_small_terminal_dimensions() {
+        let app = crate::tui::app::App::new("ctx".into());
+        let (output, _) = rendered(&app, 20, 5);
+        assert!(output.contains("ctx"));
+        let _ = rendered(&app, 1, 1);
+    }
+
+    #[test]
+    fn standard_terminal_sizes_render_and_selected_provider_row_fills_width() {
+        let app = crate::tui::app::App::new("ctx".into());
+        let _ = rendered(&app, 160, 45);
+        let _ = rendered(&app, 120, 35);
+        let (_, terminal) = rendered(&app, 80, 24);
+        let selected = terminal.backend().buffer()[(40, 6)].bg;
+        let edge = terminal.backend().buffer()[(78, 6)].bg;
+        assert_eq!(
+            selected,
+            super::K9sDark::color(crate::tui::theme::ThemeColor::Selection)
+        );
+        assert_eq!(
+            edge, selected,
+            "selection highlight should span table width"
+        );
+    }
+
+    #[test]
+    fn resource_tree_uses_branch_connectors_and_preserves_selection_highlight() {
+        let mut app = crate::tui::app::App::new("ctx".into());
+        app.view = crate::tui::app::View::Resources;
+        app.resources = vec![test_resource("parent"), test_resource("child")];
+        let parent = app.resources[0].id();
+        let child = app.resources[1].id();
+        app.graph
+            .relationships
+            .push(crate::core::relationships::Relationship {
+                from: parent,
+                to: Some(child),
+                relation: crate::core::relationships::RelationshipType::Composes,
+                unresolved: None,
+            });
+        let (output, terminal) = rendered(&app, 160, 45);
+        assert!(output.contains("└──"));
+        assert!(output.contains("Widget/child"));
+        assert_eq!(
+            terminal.backend().buffer()[(120, 10)].bg,
+            super::K9sDark::color(crate::tui::theme::ThemeColor::Selection)
+        );
     }
 }
