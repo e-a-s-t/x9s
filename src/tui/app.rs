@@ -58,6 +58,8 @@ pub struct App {
     pub context: String,
     pub cluster: Option<String>,
     pub user: Option<String>,
+    pub kubernetes_version: Option<String>,
+    pub crossplane_version: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,9 +71,6 @@ pub enum InputMode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderEntry {
-    All,
-    Unassigned,
-    Unresolved,
     Config(ResourceId),
 }
 
@@ -110,6 +109,22 @@ impl App {
             context,
             cluster: None,
             user: None,
+            kubernetes_version: None,
+            crossplane_version: None,
+        }
+    }
+
+    pub fn cache_versions(&mut self, versions: Option<(Option<String>, Option<String>)>) {
+        if let Some((kubernetes, crossplane)) = versions {
+            self.kubernetes_version = kubernetes;
+            self.crossplane_version = crossplane;
+        }
+    }
+
+    pub fn prepare_context_switch(&mut self, context: &str) {
+        if self.context != context {
+            self.kubernetes_version = None;
+            self.crossplane_version = None;
         }
     }
 
@@ -430,35 +445,33 @@ impl App {
 
     pub fn visible_provider_entries(&self) -> Vec<ProviderEntry> {
         let needle = self.filter.to_lowercase();
-        let mut entries = Vec::new();
-        if needle.is_empty() || "all providers".contains(&needle) {
-            entries.push(ProviderEntry::All);
-        }
-        if needle.is_empty() || "unassigned".contains(&needle) {
-            entries.push(ProviderEntry::Unassigned);
-        }
-        if needle.is_empty() || "unresolved providerconfig".contains(&needle) {
-            entries.push(ProviderEntry::Unresolved);
-        }
-        entries.extend(self.providers.iter().filter_map(|id| {
-            let matches = self
-                .resources
-                .iter()
-                .find(|resource| resource.id() == *id)
-                .is_some_and(|resource| {
-                    resource.name.to_lowercase().contains(&needle)
-                        || resource.kind.to_lowercase().contains(&needle)
-                        || resource.group.to_lowercase().contains(&needle)
-                        || resource
-                            .ready
-                            .status
-                            .label()
-                            .to_lowercase()
-                            .contains(&needle)
-                });
-            matches.then(|| ProviderEntry::Config(id.clone()))
-        }));
-        entries
+        self.providers
+            .iter()
+            .filter_map(|id| {
+                let matches = self
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id() == *id)
+                    .is_some_and(|resource| {
+                        resource.name.to_lowercase().contains(&needle)
+                            || resource.kind.to_lowercase().contains(&needle)
+                            || resource.group.to_lowercase().contains(&needle)
+                            || resource
+                                .namespace
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&needle)
+                            || resource
+                                .ready
+                                .status
+                                .label()
+                                .to_lowercase()
+                                .contains(&needle)
+                    });
+                matches.then(|| ProviderEntry::Config(id.clone()))
+            })
+            .collect()
     }
 
     pub fn provider_resource_count(&self, provider: &ResourceId) -> usize {
@@ -558,6 +571,23 @@ mod tests {
     }
 
     #[test]
+    fn version_cache_survives_resource_refresh_and_clears_on_context_change() {
+        let mut app = App::new("ctx-a".into());
+        app.cache_versions(Some((Some("v1.35.0".into()), Some("v2.1.0".into()))));
+        app.cache_versions(None);
+        assert_eq!(app.kubernetes_version.as_deref(), Some("v1.35.0"));
+        assert_eq!(app.crossplane_version.as_deref(), Some("v2.1.0"));
+        app.prepare_context_switch("ctx-a");
+        assert_eq!(app.kubernetes_version.as_deref(), Some("v1.35.0"));
+        app.prepare_context_switch("ctx-b");
+        assert_eq!(app.kubernetes_version, None);
+        assert_eq!(app.crossplane_version, None);
+        app.cache_versions(Some((None, Some("v2.2.0".into()))));
+        assert_eq!(app.kubernetes_version, None);
+        assert_eq!(app.crossplane_version.as_deref(), Some("v2.2.0"));
+    }
+
+    #[test]
     fn filter_and_selection_survive_refresh_by_identity() {
         let mut app = App::new("test".into());
         app.view = View::Resources;
@@ -593,21 +623,45 @@ mod tests {
     }
 
     #[test]
-    fn provider_selector_keeps_unassigned_resources_separately_browsable() {
+    fn provider_selector_contains_only_actual_provider_configs() {
         let mut app = App::new("test".into());
         app.view = View::Providers;
-        app.resources = vec![resource("alpha"), resource("beta")];
-        assert_eq!(
-            app.visible_provider_entries(),
+        let mut namespaced = resource("default");
+        namespaced.kind = "ProviderConfig".into();
+        namespaced.family = ResourceFamily::ProviderConfig;
+        namespaced.namespace = Some("team-a".into());
+        let mut cluster = resource("default");
+        cluster.kind = "ClusterProviderConfig".into();
+        cluster.family = ResourceFamily::ProviderConfig;
+        let mut same_name_other_group = namespaced.clone();
+        same_name_other_group.group = "other.example.org".into();
+        same_name_other_group.api_version = "other.example.org/v1".into();
+        app.replace_resources(
             vec![
-                ProviderEntry::All,
-                ProviderEntry::Unassigned,
-                ProviderEntry::Unresolved
-            ]
+                resource("unassigned"),
+                namespaced.clone(),
+                cluster.clone(),
+                same_name_other_group.clone(),
+            ],
+            RelationshipGraph::default(),
+            vec![],
         );
+        let entries = app.visible_provider_entries();
+        assert_eq!(entries.len(), 3);
+        assert!(entries.contains(&ProviderEntry::Config(namespaced.id())));
+        assert!(entries.contains(&ProviderEntry::Config(cluster.id())));
+        assert!(entries.contains(&ProviderEntry::Config(same_name_other_group.id())));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, ProviderEntry::Config(_)))
+                .count(),
+            3
+        );
+
         app.view = View::Resources;
         app.unassigned_only = true;
-        assert_eq!(app.visible_indices().len(), 2);
+        assert_eq!(app.visible_indices().len(), 1);
     }
 
     #[test]

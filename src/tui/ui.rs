@@ -35,6 +35,7 @@ enum Update {
         resources: Vec<Resource>,
         graph: RelationshipGraph,
         warnings: Vec<String>,
+        versions: Option<(Option<String>, Option<String>)>,
     },
     EventsLoaded {
         events: Vec<Value>,
@@ -82,6 +83,7 @@ fn request_refresh(
     connected: Option<Kubernetes>,
 ) {
     tokio::spawn(async move {
+        let refresh_versions = connected.is_none();
         let client_result = match connected {
             Some(client) => Ok(client),
             None => Kubernetes::connect(context.as_deref()).await,
@@ -95,12 +97,20 @@ fn request_refresh(
                         .chain(report.relationship_errors.iter())
                         .map(|error| error.message.clone())
                         .collect();
+                    let versions = if refresh_versions {
+                        let (kubernetes, crossplane) =
+                            tokio::join!(client.api_server_version(), client.crossplane_version(),);
+                        Some((kubernetes, crossplane))
+                    } else {
+                        None
+                    };
                     let _ = tx.send(Update::Loaded {
                         context: client.context.clone(),
                         client,
                         resources: report.all_resources,
                         graph: report.graph,
                         warnings,
+                        versions,
                     });
                 }
                 Err(error) => {
@@ -169,9 +179,11 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     resources,
                     graph,
                     warnings,
+                    versions,
                 } => {
                     app.context = context;
                     (app.cluster, app.user) = context_metadata(&app.context);
+                    app.cache_versions(versions);
                     kube_client = Some(client);
                     app.replace_resources(resources, graph, warnings);
                     app.loading = false;
@@ -356,28 +368,12 @@ fn handle_key(
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
             KeyCode::Enter => {
                 app.push_history();
-                match app.visible_provider_entries().get(app.selected) {
-                    Some(ProviderEntry::All) => {
-                        app.selected_provider = None;
-                        app.unassigned_only = false;
-                        app.unresolved_only = false;
-                    }
-                    Some(ProviderEntry::Unassigned) => {
-                        app.selected_provider = None;
-                        app.unassigned_only = true;
-                        app.unresolved_only = false;
-                    }
-                    Some(ProviderEntry::Unresolved) => {
-                        app.selected_provider = None;
-                        app.unassigned_only = false;
-                        app.unresolved_only = true;
-                    }
-                    Some(ProviderEntry::Config(provider)) => {
-                        app.selected_provider = Some(provider.clone());
-                        app.unassigned_only = false;
-                        app.unresolved_only = false;
-                    }
-                    None => {}
+                if let Some(ProviderEntry::Config(provider)) =
+                    app.visible_provider_entries().get(app.selected)
+                {
+                    app.selected_provider = Some(provider.clone());
+                    app.unassigned_only = false;
+                    app.unresolved_only = false;
                 }
                 app.view = View::Resources;
                 app.selected = 0;
@@ -478,6 +474,7 @@ fn execute_command(
     {
         app.loading = true;
         app.error = None;
+        app.prepare_context_switch(context);
         request_refresh(
             tx,
             Some(context.to_owned()),
@@ -548,9 +545,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     let header_height = if full_logo_fits(area) {
         X9S_LOGO.len() as u16
-    } else if area.width >= 120 {
+    } else if area.width >= 60 {
         6
-    } else if area.width >= 80 {
+    } else if area.width >= 40 {
         4
     } else {
         2
@@ -789,7 +786,7 @@ fn full_logo_fits(area: ratatui::layout::Rect) -> bool {
 fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let wide = area.height >= X9S_LOGO.len() as u16
         && (area.width as usize * 20 / 100) >= x9s_logo_width();
-    let medium = area.width >= 80;
+    let medium = area.width >= 60;
     let columns = if wide {
         Layout::horizontal([
             Constraint::Percentage(32),
@@ -797,28 +794,47 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout:
             Constraint::Percentage(20),
         ])
         .split(area)
-    } else if medium {
+    } else if area.width >= 80 {
         Layout::horizontal([
             Constraint::Percentage(40),
             Constraint::Percentage(48),
             Constraint::Percentage(12),
         ])
         .split(area)
-    } else {
+    } else if area.width >= 40 {
         Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area)
     };
-    let context_lines = if wide || medium {
-        vec![
-            ("Context:", app.context.as_str()),
+    let mut context_lines = vec![("Context:", app.context.as_str())];
+    if medium {
+        context_lines.extend([
             ("Cluster:", app.cluster.as_deref().unwrap_or("n/a")),
             ("User:", app.user.as_deref().unwrap_or("n/a")),
-        ]
-    } else if area.width < 40 {
-        vec![("Ctx:", app.context.as_str())]
-    } else {
-        vec![("Context:", app.context.as_str())]
-    };
-    let label_width: usize = if area.width < 40 { 4 } else { 9 };
+        ]);
+    }
+    context_lines.extend([
+        ("X9s Rev:", concat!("v", env!("CARGO_PKG_VERSION"))),
+        (
+            "K8s Rev:",
+            app.kubernetes_version.as_deref().unwrap_or("n/a"),
+        ),
+        (
+            "Crossplane:",
+            app.crossplane_version.as_deref().unwrap_or("n/a"),
+        ),
+    ]);
+    if area.width < 40 {
+        context_lines = vec![
+            ("Ctx:", app.context.as_str()),
+            ("X9s:", concat!("v", env!("CARGO_PKG_VERSION"))),
+        ];
+    }
+    let label_width = context_lines
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
     let value_width = columns[0].width.saturating_sub((label_width + 1) as u16) as usize;
     let context: Vec<Line> = context_lines
         .into_iter()
@@ -835,49 +851,52 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout:
             ])
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(context).wrap(Wrap { trim: true }),
-        columns[0],
-    );
+    frame.render_widget(Paragraph::new(context), columns[0]);
+
     let all = shortcuts(app.view);
-    let max = if wide {
-        all.len()
-    } else if medium {
-        all.len().min(6)
-    } else {
-        all.len().min(2)
-    };
-    let split = if wide {
+    let column_count = if wide {
         3
     } else if medium {
         2
     } else {
         1
     };
-    let lines = (0..split)
-        .map(|col| {
-            let spans = (col..max)
-                .step_by(split)
-                .flat_map(|i| {
-                    let item = all[i];
-                    [
-                        Span::styled(
-                            item.key,
-                            Style::default().fg(K9sDark::color(ThemeColor::Shortcut)),
-                        ),
-                        Span::raw(" "),
-                        Span::styled(
-                            item.description,
-                            Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
-                        ),
-                        Span::raw(if wide { "   " } else { "  " }),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            Line::from(spans)
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), columns[1]);
+    let visible = if column_count == 1 {
+        all.len().min(2)
+    } else {
+        all.len()
+    };
+    let row_count = visible.div_ceil(column_count);
+    let legend_columns = Layout::horizontal(vec![
+        Constraint::Percentage(100 / column_count as u16);
+        column_count
+    ])
+    .split(columns[1]);
+    for column in 0..column_count {
+        let cells = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Length(1); row_count])
+            .split(legend_columns[column]);
+        for row in 0..row_count {
+            let index = row * column_count + column;
+            if index >= visible {
+                continue;
+            }
+            let item = all[index];
+            let key_width = 8usize;
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{:<key_width$}", item.key),
+                    Style::default().fg(K9sDark::color(ThemeColor::Shortcut)),
+                ),
+                Span::styled(
+                    item.description,
+                    Style::default().fg(K9sDark::color(ThemeColor::Foreground)),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line), cells[row]);
+        }
+    }
     if wide {
         let logo_width = x9s_logo_width() as u16;
         let logo_x = columns[2].right().saturating_sub(logo_width);
@@ -893,7 +912,7 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout:
                 Rect::new(logo_x, area.y + index as u16, logo_width, 1),
             );
         }
-    } else if medium {
+    } else if area.width >= 80 {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "X9s",
@@ -936,91 +955,18 @@ fn set_tree_mode(app: &mut App, tree: bool) {
 
 fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let entries = app.visible_provider_entries();
-    let mut rows = Vec::new();
-    let count_width = ((area.width as usize) * if area.width < 80 { 16 } else { 15 }) / 100;
-    for entry in &entries {
-        let id = match entry {
-            ProviderEntry::All => {
-                let count = app
-                    .resources
-                    .iter()
-                    .filter(|resource| {
-                        resource.family != crate::core::ResourceFamily::ProviderConfig
-                            && !resource.family.is_system()
-                    })
-                    .map(Resource::id)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                rows.push(provider_row(
-                    "All Providers",
-                    "-",
-                    count,
-                    "Missing",
-                    area.width < 80,
-                    count_width,
-                ));
-                continue;
-            }
-            ProviderEntry::Unassigned => {
-                let count = app
-                    .resources
-                    .iter()
-                    .filter(|resource| {
-                        resource.family == crate::core::ResourceFamily::ManagedResource
-                    })
-                    .filter(|resource| {
-                        resource
-                            .original
-                            .pointer("/spec/providerConfigRef")
-                            .is_none()
-                    })
-                    .map(Resource::id)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                rows.push(provider_row(
-                    "Unassigned",
-                    "-",
-                    count,
-                    "Unknown",
-                    area.width < 80,
-                    count_width,
-                ));
-                continue;
-            }
-            ProviderEntry::Unresolved => {
-                let count = app
-                    .resources
-                    .iter()
-                    .filter(|resource| {
-                        resource.family == crate::core::ResourceFamily::ManagedResource
-                    })
-                    .filter(|resource| {
-                        app.graph.relationships.iter().any(|edge| {
-                            edge.relation == crate::core::RelationshipType::ManagedBy
-                                && edge.from == resource.id()
-                                && edge.to.is_none()
-                        })
-                    })
-                    .map(Resource::id)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                rows.push(provider_row(
-                    "Unresolved ProviderConfig",
-                    "-",
-                    count,
-                    if count == 0 { "Healthy" } else { "Degraded" },
-                    area.width < 80,
-                    count_width,
-                ));
-                continue;
-            }
-            ProviderEntry::Config(id) => id,
-        };
-        let resource = app.resources.iter().find(|resource| resource.id() == *id);
-        let label = format_resource_id(id);
-        let provider = resource
-            .and_then(|config| {
-                config.provider_owner_uid.as_deref().and_then(|uid| {
+    let labels = provider_display_names(app);
+    let narrow = area.width < 80;
+    let count_width = 4;
+    let rows = entries
+        .iter()
+        .filter_map(|entry| {
+            let ProviderEntry::Config(id) = entry;
+            let resource = app.resources.iter().find(|resource| resource.id() == *id)?;
+            let provider = resource
+                .provider_owner_uid
+                .as_deref()
+                .and_then(|uid| {
                     app.resources
                         .iter()
                         .find(|candidate| candidate.uid.as_deref() == Some(uid))
@@ -1028,24 +974,28 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                             revision
                                 .original
                                 .pointer("/metadata/ownerReferences/0/name")
-                                .and_then(Value::as_str)
                         })
+                        .and_then(Value::as_str)
                 })
-            })
-            .unwrap_or("-");
-        let count = app.provider_resource_count(id);
-        rows.push(provider_row(
-            &label,
-            provider,
-            count,
-            resource
-                .map(|item| item.ready.status.label())
-                .unwrap_or("Missing"),
-            area.width < 80,
-            count_width,
-        ));
-    }
-    let widths = if area.width < 80 {
+                .unwrap_or("-");
+            let status = match &resource.ready.status {
+                ConditionStatus::Missing => "Unknown",
+                _ => resource.ready.status.label(),
+            };
+            Some(provider_row(
+                labels
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or("ProviderConfig"),
+                provider,
+                app.provider_resource_count(id),
+                status,
+                narrow,
+                count_width,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let widths = if narrow {
         vec![
             Constraint::Percentage(68),
             Constraint::Percentage(16),
@@ -1061,7 +1011,7 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
     };
     let table = Table::new(rows, widths)
         .header(
-            Row::new(if area.width < 80 {
+            Row::new(if narrow {
                 vec!["NAME", "RESOURCES", "STATUS"]
             } else {
                 vec!["NAME", "PROVIDER", "RESOURCES", "STATUS"]
@@ -1089,6 +1039,32 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
         area,
         &mut TableState::default().with_selected((!entries.is_empty()).then_some(app.selected)),
     );
+}
+
+fn provider_display_names(app: &App) -> std::collections::HashMap<crate::core::ResourceId, String> {
+    let mut labels = std::collections::HashMap::new();
+    for id in &app.providers {
+        let base = id
+            .namespace
+            .as_deref()
+            .map(|namespace| format!("{}/{namespace}/{}", id.kind, id.name))
+            .unwrap_or_else(|| format!("{}/{}", id.kind, id.name));
+        labels.insert(id.clone(), base);
+    }
+    let values = labels.values().cloned().collect::<Vec<_>>();
+    for (id, label) in &mut labels {
+        if values.iter().filter(|other| *other == label).count() > 1 {
+            label.push_str(&format!(
+                " [{}]",
+                if id.group.is_empty() {
+                    "core"
+                } else {
+                    &id.group
+                }
+            ));
+        }
+    }
+    labels
 }
 
 fn provider_row(
@@ -1656,12 +1632,15 @@ mod tests {
         assert!(output.contains("kind-local-dev"));
         assert!(output.contains("Cluster:"));
         assert!(output.contains("User:"));
-        assert!(!output.contains("K8s Rev:"));
         assert!(!output.contains("CPU:"));
         assert!(!output.contains("MEM:"));
-        assert!(!output.contains("n/a"));
+        assert!(output.contains("X9s Rev:"));
+        assert!(output.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(output.contains("K8s Rev:"));
+        assert!(output.contains("Crossplane:"));
+        assert!(output.contains("n/a"));
         assert!(output.contains("<enter>"));
-        assert!(output.contains("Providers"));
+        assert!(output.contains("Refresh"));
         let logo_width = super::x9s_logo_width();
         let logo_x = 160 - logo_width;
         for (row, art) in super::X9S_LOGO.iter().enumerate() {
@@ -1685,12 +1664,31 @@ mod tests {
         assert!(provider_output.contains("<enter>"));
         assert!(provider_output.contains("Filter"));
         assert!(provider_output.contains("X9s"));
+        let (wide_output, _) = rendered(&app, 160, 45);
+        for (key, description) in [("<enter>", "Open"), ("<:>", "Commands"), ("<r>", "Refresh")] {
+            let row = wide_output
+                .lines()
+                .find(|line| line.contains(description))
+                .unwrap();
+            assert_eq!(
+                row.find(description).unwrap() - row.find(key).unwrap(),
+                8,
+                "description should start at a fixed offset from {key}"
+            );
+        }
+        let legend_line = provider_output
+            .lines()
+            .find(|line| line.contains("<enter>"))
+            .unwrap();
+        assert!(
+            legend_line.find("<enter>").unwrap() < legend_line.find("<r>").unwrap_or(usize::MAX)
+        );
         app.view = crate::tui::app::View::Resources;
         let (resource_output, _) = rendered(&app, 160, 45);
         assert!(resource_output.contains("Collapse/Expand"));
         assert!(resource_output.contains("Tree/Flat"));
         let (narrow_output, _) = rendered(&app, 60, 24);
-        assert!(!narrow_output.contains("X9s"));
+        assert!(!narrow_output.contains("$$\\   $$\\"));
         let (short_output, _) = rendered(&app, 160, 9);
         assert!(!short_output.contains("$$\\   $$\\"));
     }
@@ -1704,13 +1702,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_without_ready_condition_displays_unknown() {
+        let mut app = crate::tui::app::App::new("ctx".into());
+        let mut config = test_resource("default");
+        config.family = ResourceFamily::ProviderConfig;
+        config.kind = "ProviderConfig".into();
+        app.providers = vec![config.id()];
+        app.resources = vec![config];
+        let (output, _) = rendered(&app, 160, 30);
+        assert!(output.contains("Unknown"));
+        assert!(!output.contains("Missing"));
+    }
+
+    #[test]
     fn standard_terminal_sizes_render_and_selected_provider_row_fills_width() {
-        let app = crate::tui::app::App::new("ctx".into());
+        let mut app = crate::tui::app::App::new("ctx".into());
         let _ = rendered(&app, 160, 45);
         let _ = rendered(&app, 120, 35);
+        let mut config = test_resource("default");
+        config.family = ResourceFamily::ProviderConfig;
+        config.kind = "ProviderConfig".into();
+        app.providers = vec![config.id()];
+        app.resources = vec![config];
         let (_, terminal) = rendered(&app, 80, 24);
-        let selected = terminal.backend().buffer()[(40, 6)].bg;
-        let edge = terminal.backend().buffer()[(78, 6)].bg;
+        let selected = terminal.backend().buffer()[(40, 8)].bg;
+        let edge = terminal.backend().buffer()[(78, 8)].bg;
         assert_eq!(
             selected,
             super::K9sDark::color(crate::tui::theme::ThemeColor::Selection)

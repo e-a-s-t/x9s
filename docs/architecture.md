@@ -11,7 +11,7 @@
 
 ## Identity and discovery
 
-Graph identity includes API version, group, kind, namespace, name, and UID when available. API discovery determines namespaced versus cluster scope; resource names and kinds are not assumed to be globally unique. Discovery lists MR, XR, ProviderConfig, and Crossplane diagnostic object instances; unrelated referenced targets are fetched by exact identity. Definitions are not treated as instances. ProviderConfigs without associated resources remain selectable. Unassigned resources have no ProviderConfig reference; unresolved references have their own selector entry and remain visible in `:all`.
+Graph identity includes API version, group, kind, namespace, name, and UID when available. API discovery determines namespaced versus cluster scope; resource names and kinds are not assumed to be globally unique. Discovery lists MR, XR, ProviderConfig, and Crossplane diagnostic object instances; unrelated referenced targets are fetched by exact identity. Definitions are not treated as instances. ProviderConfigs without associated resources remain selectable. Unassigned resources have no ProviderConfig reference and unresolved references remain visible in `:all` and relationship diagnostics. Neither is a synthetic selector row.
 
 Managed Resource classification remains conservative. Only confirmed Managed Resources are returned by the existing CLI contract. The TUI displays actual MR and XR objects plus exact referenced targets; Crossplane control-plane instances are confined to `:system`. An API or RBAC failure for one CRD is recorded as a partial discovery error while other types continue. Relationship resolution happens after listing and cannot remove an instance from `:all`.
 
@@ -21,7 +21,7 @@ The graph preserves `COMPOSES`, `MANAGED_BY`, `REFERENCES`, `OWNS`, `SELECTS`, a
 
 ## TUI behavior
 
-The initial screen lists ProviderConfigs, All Providers, Unassigned, and Unresolved ProviderConfig resources. ProviderConfig counts are unique managed-resource instances, independent of edge or tree multiplicity. Resource navigation supports tree and flat modes, filtering, details, sanitized YAML, Kubernetes Events, describe output, health filtering, command mode, and navigation history. `:system` opens the Crossplane diagnostic object inventory. YAML redacts Secret data/stringData and credential-like fields before rendering.
+The initial screen lists actual ProviderConfig objects only. Selector identities retain API group, kind, namespace, and name; display qualifiers disambiguate duplicate names. Counts are unique managed-resource instances, independent of edge or tree multiplicity. ProviderConfig health uses its explicit Ready condition when present and reports Unknown when health is absent. The header shows the Cargo package version and cached Kubernetes and Crossplane versions; unavailable versions display as n/a and are refreshed after context changes. Resource navigation supports tree and flat modes, filtering, details, sanitized YAML, Kubernetes Events, describe output, health filtering, command mode, and navigation history. `:system` opens the Crossplane diagnostic object inventory. YAML redacts Secret data/stringData and credential-like fields before rendering.
 
 ## Limitations
 

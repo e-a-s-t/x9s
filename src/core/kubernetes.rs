@@ -93,6 +93,69 @@ impl Kubernetes {
         })
     }
 
+    pub async fn api_server_version(&self) -> Option<String> {
+        self.client
+            .apiserver_version()
+            .await
+            .ok()
+            .map(|version| version.git_version)
+            .filter(|version| !version.is_empty())
+    }
+
+    pub async fn crossplane_version(&self) -> Option<String> {
+        let deployments: Api<DynamicObject> = Api::all_with(
+            self.client.clone(),
+            &ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("apps", "v1", "Deployment"),
+                "deployments",
+            ),
+        );
+        let items = deployments.list(&ListParams::default()).await.ok()?.items;
+        let mut candidates = items.iter().filter_map(|deployment| {
+            let name = deployment
+                .data
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            let labels = deployment
+                .data
+                .pointer("/metadata/labels")
+                .and_then(Value::as_object);
+            let controller_metadata = name == "crossplane"
+                || labels.is_some_and(|labels| {
+                    labels.iter().any(|(key, value)| {
+                        (key.ends_with("/name") || key == "app")
+                            && value
+                                .as_str()
+                                .is_some_and(|value| value.eq_ignore_ascii_case("crossplane"))
+                    })
+                });
+            let images = deployment
+                .data
+                .pointer("/spec/template/spec/containers")
+                .and_then(Value::as_array)?;
+            images
+                .iter()
+                .filter_map(|container| {
+                    let image = container.get("image")?.as_str()?;
+                    let image_name = image.split('@').next().unwrap_or(image).to_lowercase();
+                    let is_controller_image = image_name.contains("crossplane")
+                        && !image_name.contains("provider-")
+                        && !image_name.contains("provider/");
+                    (controller_metadata && is_controller_image)
+                        .then(|| image_version(image))
+                        .flatten()
+                })
+                .next()
+        });
+        let version = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        Some(version)
+    }
+
     pub async fn list_managed_resources(&self) -> Result<DiscoveryReport> {
         info!(context = %self.context, "starting Crossplane resource discovery");
         let crds: Api<DynamicObject> = Api::all_with(
@@ -622,6 +685,13 @@ fn discovery_resource_matches(
         && capabilities.supports_operation(verbs::LIST)
 }
 
+fn image_version(image: &str) -> Option<String> {
+    let image = image.split('@').next()?;
+    let last_component = image.rsplit('/').next()?;
+    let (_, tag) = last_component.rsplit_once(':')?;
+    (!tag.is_empty() && tag != "latest").then(|| tag.to_owned())
+}
+
 pub async fn kube_context(context: Option<&str>) -> Result<String> {
     match context {
         Some(context) => Config::from_kubeconfig(&kube::config::KubeConfigOptions {
@@ -796,5 +866,18 @@ mod tests {
             non_empty_continue_token(Some("next-page".to_owned())),
             Some("next-page".to_owned())
         );
+    }
+
+    #[test]
+    fn crossplane_image_version_requires_a_real_tag() {
+        assert_eq!(
+            image_version("ghcr.io/crossplane/crossplane:v2.1.0"),
+            Some("v2.1.0".into())
+        );
+        assert_eq!(
+            image_version("ghcr.io/crossplane/crossplane@sha256:abc"),
+            None
+        );
+        assert_eq!(image_version("ghcr.io/crossplane/crossplane:latest"), None);
     }
 }
