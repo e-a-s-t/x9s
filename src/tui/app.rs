@@ -60,6 +60,8 @@ pub struct App {
     pub user: Option<String>,
     pub kubernetes_version: Option<String>,
     pub crossplane_version: Option<String>,
+    pub crossplane_version_diagnostic: Option<String>,
+    pub provider_images: std::collections::HashMap<ResourceId, String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +69,13 @@ pub enum InputMode {
     None,
     Filter,
     Command,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VersionCache {
+    pub kubernetes: Option<String>,
+    pub crossplane: Option<String>,
+    pub crossplane_diagnostic: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,13 +120,16 @@ impl App {
             user: None,
             kubernetes_version: None,
             crossplane_version: None,
+            crossplane_version_diagnostic: None,
+            provider_images: std::collections::HashMap::new(),
         }
     }
 
-    pub fn cache_versions(&mut self, versions: Option<(Option<String>, Option<String>)>) {
-        if let Some((kubernetes, crossplane)) = versions {
-            self.kubernetes_version = kubernetes;
-            self.crossplane_version = crossplane;
+    pub fn cache_versions(&mut self, versions: Option<VersionCache>) {
+        if let Some(versions) = versions {
+            self.kubernetes_version = versions.kubernetes;
+            self.crossplane_version = versions.crossplane;
+            self.crossplane_version_diagnostic = versions.crossplane_diagnostic;
         }
     }
 
@@ -125,6 +137,8 @@ impl App {
         if self.context != context {
             self.kubernetes_version = None;
             self.crossplane_version = None;
+            self.crossplane_version_diagnostic = None;
+            self.provider_images.clear();
         }
     }
 
@@ -165,6 +179,9 @@ impl App {
             self.unassigned_only = true;
         }
         self.warnings = warnings;
+        if let Some(diagnostic) = &self.crossplane_version_diagnostic {
+            self.warnings.push(diagnostic.clone());
+        }
         if self.view == View::Providers {
             if let Some(old_provider_selected) = old_provider_selected {
                 self.selected = self
@@ -573,16 +590,34 @@ mod tests {
     #[test]
     fn version_cache_survives_resource_refresh_and_clears_on_context_change() {
         let mut app = App::new("ctx-a".into());
-        app.cache_versions(Some((Some("v1.35.0".into()), Some("v2.1.0".into()))));
+        app.cache_versions(Some(VersionCache {
+            kubernetes: Some("v1.35.0".into()),
+            crossplane: Some("v2.1.0".into()),
+            crossplane_diagnostic: Some("version discovery failed".into()),
+        }));
         app.cache_versions(None);
+        app.replace_resources(Vec::new(), RelationshipGraph::default(), vec![]);
         assert_eq!(app.kubernetes_version.as_deref(), Some("v1.35.0"));
         assert_eq!(app.crossplane_version.as_deref(), Some("v2.1.0"));
+        assert_eq!(
+            app.crossplane_version_diagnostic.as_deref(),
+            Some("version discovery failed")
+        );
+        assert!(app
+            .warnings
+            .iter()
+            .any(|warning| warning == "version discovery failed"));
         app.prepare_context_switch("ctx-a");
         assert_eq!(app.kubernetes_version.as_deref(), Some("v1.35.0"));
         app.prepare_context_switch("ctx-b");
         assert_eq!(app.kubernetes_version, None);
         assert_eq!(app.crossplane_version, None);
-        app.cache_versions(Some((None, Some("v2.2.0".into()))));
+        assert_eq!(app.crossplane_version_diagnostic, None);
+        app.cache_versions(Some(VersionCache {
+            kubernetes: None,
+            crossplane: Some("v2.2.0".into()),
+            crossplane_diagnostic: None,
+        }));
         assert_eq!(app.kubernetes_version, None);
         assert_eq!(app.crossplane_version.as_deref(), Some("v2.2.0"));
     }

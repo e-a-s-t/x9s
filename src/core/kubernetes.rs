@@ -56,6 +56,15 @@ pub struct DiscoveryReport {
     pub classifications: Vec<TypeClassification>,
     pub errors: Vec<DiscoveryError>,
     pub relationship_errors: Vec<DiscoveryError>,
+    /// Installed package references resolved for ProviderConfigs through owner UIDs.
+    pub provider_images: HashMap<crate::core::ResourceId, String>,
+    pub provider_package_diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CrossplaneVersionDiscovery {
+    pub version: Option<String>,
+    pub diagnostic: Option<String>,
 }
 
 impl DiscoveryReport {
@@ -102,7 +111,7 @@ impl Kubernetes {
             .filter(|version| !version.is_empty())
     }
 
-    pub async fn crossplane_version(&self) -> Option<String> {
+    pub async fn crossplane_version(&self) -> CrossplaneVersionDiscovery {
         let deployments: Api<DynamicObject> = Api::all_with(
             self.client.clone(),
             &ApiResource::from_gvk_with_plural(
@@ -110,50 +119,22 @@ impl Kubernetes {
                 "deployments",
             ),
         );
-        let items = deployments.list(&ListParams::default()).await.ok()?.items;
-        let mut candidates = items.iter().filter_map(|deployment| {
-            let name = deployment
-                .data
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            let labels = deployment
-                .data
-                .pointer("/metadata/labels")
-                .and_then(Value::as_object);
-            let controller_metadata = name == "crossplane"
-                || labels.is_some_and(|labels| {
-                    labels.iter().any(|(key, value)| {
-                        (key.ends_with("/name") || key == "app")
-                            && value
-                                .as_str()
-                                .is_some_and(|value| value.eq_ignore_ascii_case("crossplane"))
-                    })
-                });
-            let images = deployment
-                .data
-                .pointer("/spec/template/spec/containers")
-                .and_then(Value::as_array)?;
-            images
-                .iter()
-                .filter_map(|container| {
-                    let image = container.get("image")?.as_str()?;
-                    let image_name = image.split('@').next().unwrap_or(image).to_lowercase();
-                    let is_controller_image = image_name.contains("crossplane")
-                        && !image_name.contains("provider-")
-                        && !image_name.contains("provider/");
-                    (controller_metadata && is_controller_image)
-                        .then(|| image_version(image))
-                        .flatten()
-                })
-                .next()
-        });
-        let version = candidates.next()?;
-        if candidates.next().is_some() {
-            return None;
-        }
-        Some(version)
+        let items = match deployments.list(&ListParams::default()).await {
+            Ok(list) => list.items,
+            Err(error) => {
+                let kind = kube_error_kind(&error);
+                warn!(
+                    error_kind = kind,
+                    "Crossplane controller Deployment discovery failed"
+                );
+                return failed_crossplane_version_discovery(kind);
+            }
+        };
+        let values: Vec<_> = items
+            .into_iter()
+            .map(|deployment| deployment.data)
+            .collect();
+        resolve_crossplane_version(&values)
     }
 
     pub async fn list_managed_resources(&self) -> Result<DiscoveryReport> {
@@ -436,6 +417,8 @@ impl Kubernetes {
         let mut graph_identities = std::collections::HashSet::new();
         all_resources.retain(|resource| graph_identities.insert(resource.id()));
         let graph = RelationshipGraph::build(&all_resources);
+        let (provider_images, provider_package_diagnostics) =
+            self.discover_provider_packages(&all_resources).await;
         for provider_config in all_resources
             .iter()
             .filter(|resource| resource.family == ResourceFamily::ProviderConfig)
@@ -509,7 +492,46 @@ impl Kubernetes {
             classifications,
             errors,
             relationship_errors: reference_errors,
+            provider_images,
+            provider_package_diagnostics,
         })
+    }
+
+    async fn discover_provider_packages(
+        &self,
+        resources: &[Resource],
+    ) -> (HashMap<crate::core::ResourceId, String>, Vec<String>) {
+        let api: Api<DynamicObject> = Api::all_with(
+            self.client.clone(),
+            &ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("pkg.crossplane.io", "v1", "Provider"),
+                "providers",
+            ),
+        );
+        let Ok(list) = api.list(&ListParams::default()).await else {
+            return (
+                HashMap::new(),
+                vec!["Provider package discovery failed: could not list Providers from pkg.crossplane.io/v1.".into()],
+            );
+        };
+        let packages: Vec<InstalledProvider> = list
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let value = serde_json::to_value(item).ok()?;
+                let package = value.pointer("/spec/package")?.as_str()?.to_owned();
+                let uid = value.pointer("/metadata/uid")?.as_str()?.to_owned();
+                let name = value.pointer("/metadata/name")?.as_str()?.to_owned();
+                Some(InstalledProvider { uid, name, package })
+            })
+            .collect();
+        if packages.is_empty() {
+            return (
+                HashMap::new(),
+                vec!["Provider package discovery returned no installed Providers.".into()],
+            );
+        }
+        resolve_provider_packages(resources, &packages)
     }
 
     pub async fn list_events(&self, resource: &Resource) -> Result<Vec<Value>> {
@@ -685,11 +707,174 @@ fn discovery_resource_matches(
         && capabilities.supports_operation(verbs::LIST)
 }
 
+#[derive(Clone, Debug)]
+struct InstalledProvider {
+    uid: String,
+    name: String,
+    package: String,
+}
+
+fn resolve_provider_packages(
+    resources: &[Resource],
+    packages: &[InstalledProvider],
+) -> (HashMap<crate::core::ResourceId, String>, Vec<String>) {
+    let mut resolved = HashMap::new();
+    let mut diagnostics = Vec::new();
+    for config in resources
+        .iter()
+        .filter(|resource| resource.family == ResourceFamily::ProviderConfig)
+    {
+        let identity = format!("{}/{} [{}]", config.kind, config.name, config.group);
+        let Some(owner_uid) = config.provider_owner_uid.as_deref() else {
+            diagnostics.push(format!(
+                "Provider package association unavailable for {identity}: owning ProviderRevision UID is missing."
+            ));
+            continue;
+        };
+
+        let revisions: Vec<_> = resources
+            .iter()
+            .filter(|resource| {
+                resource.family == ResourceFamily::ProviderRevision
+                    && resource.uid.as_deref() == Some(owner_uid)
+            })
+            .collect();
+        let provider_uids: Vec<&str> = if revisions.is_empty() {
+            packages
+                .iter()
+                .filter(|provider| provider.uid == owner_uid)
+                .map(|provider| provider.uid.as_str())
+                .collect()
+        } else {
+            if revisions.len() != 1 {
+                diagnostics.push(format!(
+                    "Provider package association ambiguous for {identity}: multiple ProviderRevisions share the owner UID."
+                ));
+                continue;
+            }
+            revisions[0]
+                .original
+                .pointer("/metadata/ownerReferences")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|owner| {
+                    owner.get("kind").and_then(Value::as_str) == Some("Provider")
+                        && owner
+                            .get("apiVersion")
+                            .and_then(Value::as_str)
+                            .is_some_and(|version| version.starts_with("pkg.crossplane.io/"))
+                })
+                .filter_map(|owner| owner.get("uid").and_then(Value::as_str))
+                .collect()
+        };
+
+        let matching_packages: Vec<_> = packages
+            .iter()
+            .filter(|provider| provider_uids.contains(&provider.uid.as_str()))
+            .collect();
+        match matching_packages.as_slice() {
+            [provider] => {
+                resolved.insert(config.id(), provider.package.clone());
+                info!(provider = %provider.name, provider_config = %identity, "resolved ProviderConfig package by owner UID");
+            }
+            [] => diagnostics.push(format!(
+                "Provider package association failed for {identity}: no installed Provider owns the referenced ProviderRevision."
+            )),
+            _ => diagnostics.push(format!(
+                "Provider package association ambiguous for {identity}: multiple installed Providers own the referenced ProviderRevision."
+            )),
+        }
+    }
+    (resolved, diagnostics)
+}
+
 fn image_version(image: &str) -> Option<String> {
     let image = image.split('@').next()?;
     let last_component = image.rsplit('/').next()?;
     let (_, tag) = last_component.rsplit_once(':')?;
     (!tag.is_empty() && tag != "latest").then(|| tag.to_owned())
+}
+
+fn resolve_crossplane_version(deployments: &[Value]) -> CrossplaneVersionDiscovery {
+    let controllers: Vec<_> = deployments
+        .iter()
+        .filter(|deployment| {
+            deployment
+                .pointer("/spec/template/spec/containers")
+                .and_then(Value::as_array)
+                .is_some_and(|containers| containers.iter().any(is_crossplane_controller_container))
+        })
+        .collect();
+    let deployment = match controllers.as_slice() {
+        [deployment] => deployment,
+        [] => {
+            return CrossplaneVersionDiscovery {
+                version: None,
+                diagnostic: Some(
+                    "Crossplane version unavailable: no controller Deployment with a core start container was found.".into(),
+                ),
+            }
+        }
+        _ => {
+            return CrossplaneVersionDiscovery {
+                version: None,
+                diagnostic: Some(format!(
+                    "Crossplane version unavailable: found {} controller Deployments; refusing to choose one arbitrarily.",
+                    controllers.len()
+                )),
+            }
+        }
+    };
+
+    let label_version = deployment
+        .pointer("/metadata/labels/app.kubernetes.io~1version")
+        .and_then(Value::as_str)
+        .and_then(normalize_version);
+    let image_version = deployment
+        .pointer("/spec/template/spec/containers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|container| is_crossplane_controller_container(container))
+        .filter_map(|container| container.pointer("/image").and_then(Value::as_str))
+        .filter_map(image_version)
+        .filter_map(|version| normalize_version(&version))
+        .next();
+    let version = label_version.or(image_version);
+    CrossplaneVersionDiscovery {
+        diagnostic: version.is_none().then(|| {
+            "Crossplane version unavailable: the controller Deployment has no reliable version label or image tag.".into()
+        }),
+        version,
+    }
+}
+
+fn failed_crossplane_version_discovery(error_kind: &str) -> CrossplaneVersionDiscovery {
+    CrossplaneVersionDiscovery {
+        version: None,
+        diagnostic: Some(format!(
+            "Crossplane version unavailable: could not list Deployments ({error_kind})."
+        )),
+    }
+}
+
+fn is_crossplane_controller_container(container: &Value) -> bool {
+    container
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|args| {
+            args.first().and_then(Value::as_str) == Some("core")
+                && args.get(1).and_then(Value::as_str) == Some("start")
+        })
+}
+
+fn normalize_version(version: &str) -> Option<String> {
+    let version = version.trim();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next()?;
+    (core.split('.').count() >= 2 && core.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .then(|| format!("v{version}"))
 }
 
 pub async fn kube_context(context: Option<&str>) -> Result<String> {
@@ -774,6 +959,132 @@ pub(crate) fn parse_crd(value: &Value) -> Option<CrdInfo> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn provider_config(group: &str, kind: &str, revision_uid: Option<&str>) -> Resource {
+        let crd = CrdInfo {
+            group: group.into(),
+            kind: kind.into(),
+            namespaced: kind == "ProviderConfig",
+            schema: json!({}),
+            labels: json!({}),
+            annotations: json!({}),
+            owner_references: revision_uid.map_or(json!([]), |uid| {
+                json!([
+                    {"apiVersion":"pkg.crossplane.io/v1", "kind":"ProviderRevision", "uid":uid}
+                ])
+            }),
+            categories: vec![],
+            family: ResourceFamily::ProviderConfig,
+            api_version: format!("{group}/v1"),
+            plural: "providerconfigs".into(),
+            provider_config_default_kind: None,
+            vcd_vapp_name_reference: false,
+        };
+        crossplane::normalize(
+            json!({"apiVersion":format!("{group}/v1"),"kind":kind,"metadata":{"name":"default", "namespace":if kind == "ProviderConfig" {Some("default")} else {None}}}),
+            &crd,
+        )
+    }
+
+    fn provider_revision(uid: &str, provider_uids: &[&str]) -> Resource {
+        let mut resource = provider_config("pkg.crossplane.io", "ProviderRevision", None);
+        resource.family = ResourceFamily::ProviderRevision;
+        resource.uid = Some(uid.into());
+        resource.original["metadata"]["ownerReferences"] = json!(provider_uids
+            .iter()
+            .map(|provider_uid| json!({
+                "apiVersion":"pkg.crossplane.io/v1", "kind":"Provider", "uid":provider_uid
+            }))
+            .collect::<Vec<_>>());
+        resource
+    }
+
+    fn installed_provider(uid: &str, name: &str, package: &str) -> InstalledProvider {
+        InstalledProvider {
+            uid: uid.into(),
+            name: name.into(),
+            package: package.into(),
+        }
+    }
+
+    #[test]
+    fn provider_configs_resolve_packages_through_revision_owner_uids() {
+        let talos = "ghcr.io/crossplane-contrib/provider-talos:v0.2.0";
+        let vcd = "harbor.carekube.com/carekube/provider-vcd:dev-8634a2a2e85a";
+        let configs = vec![
+            provider_config("talos.crossplane.io", "ProviderConfig", Some("talos-rev")),
+            provider_config("vcd.carekube.com", "ProviderConfig", Some("vcd-rev")),
+            provider_config(
+                "vcd.m.carekube.com",
+                "ClusterProviderConfig",
+                Some("vcd-rev"),
+            ),
+        ];
+        let resources = vec![
+            configs[0].clone(),
+            configs[1].clone(),
+            configs[2].clone(),
+            provider_revision("talos-rev", &["talos-provider"]),
+            provider_revision("vcd-rev", &["vcd-provider"]),
+        ];
+        let packages = vec![
+            installed_provider("talos-provider", "provider-talos", talos),
+            installed_provider("vcd-provider", "provider-vcd", vcd),
+        ];
+        let (resolved, diagnostics) = resolve_provider_packages(&resources, &packages);
+        assert_eq!(
+            resolved.get(&configs[0].id()).map(String::as_str),
+            Some(talos)
+        );
+        assert_eq!(
+            resolved.get(&configs[1].id()).map(String::as_str),
+            Some(vcd)
+        );
+        assert_eq!(
+            resolved.get(&configs[2].id()).map(String::as_str),
+            Some(vcd)
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn provider_package_association_reports_missing_and_ambiguous_ownership() {
+        let unresolved = provider_config("unknown.example.org", "ProviderConfig", None);
+        let ambiguous = provider_config("ambiguous.example.org", "ProviderConfig", Some("rev"));
+        let resources = vec![
+            unresolved,
+            ambiguous,
+            provider_revision("rev", &["provider-a", "provider-b"]),
+        ];
+        let packages = vec![
+            installed_provider("provider-a", "provider-a", "registry/a:v1"),
+            installed_provider("provider-b", "provider-b", "registry/b:v1"),
+        ];
+        let (resolved, diagnostics) = resolve_provider_packages(&resources, &packages);
+        assert!(resolved.is_empty());
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("UID is missing")));
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("ambiguous")));
+    }
+
+    #[test]
+    fn provider_package_association_reports_unmatched_owner_uid() {
+        let config = provider_config("vcd.carekube.com", "ProviderConfig", Some("missing-rev"));
+        let (resolved, diagnostics) = resolve_provider_packages(
+            std::slice::from_ref(&config),
+            &[installed_provider(
+                "provider-vcd",
+                "provider-vcd",
+                "registry/vcd:v1",
+            )],
+        );
+        assert!(resolved.is_empty());
+        assert!(diagnostics[0].contains("association failed"));
+    }
 
     #[test]
     fn parses_discovered_crd_scope_and_served_version() {
@@ -879,5 +1190,120 @@ mod tests {
             None
         );
         assert_eq!(image_version("ghcr.io/crossplane/crossplane:latest"), None);
+    }
+
+    #[test]
+    fn deployment_version_is_normalized_and_rejects_unreliable_values() {
+        assert_eq!(normalize_version("2.2.1"), Some("v2.2.1".into()));
+        assert_eq!(normalize_version("v2.2.1"), Some("v2.2.1".into()));
+        assert_eq!(normalize_version("latest"), None);
+        assert_eq!(normalize_version(""), None);
+    }
+
+    fn deployment(
+        name: &str,
+        namespace: &str,
+        args: &[&str],
+        image: &str,
+        version: Option<&str>,
+    ) -> Value {
+        let mut labels = json!({"app.kubernetes.io/name":"crossplane", "app.kubernetes.io/instance":"release-x"});
+        if let Some(version) = version {
+            labels["app.kubernetes.io/version"] = json!(version);
+        }
+        json!({
+            "metadata":{"name":name,"namespace":namespace,"labels":labels},
+            "spec":{"template":{"spec":{"containers":[{"name":"crossplane","args":args,"image":image}]}}}
+        })
+    }
+
+    #[test]
+    fn crossplane_deployment_label_wins_and_rbac_manager_is_excluded() {
+        let controller = deployment(
+            "custom-core-release",
+            "custom-system-namespace",
+            &["core", "start"],
+            "xpkg.crossplane.io/crossplane/crossplane:v2.1.0",
+            Some("2.2.1"),
+        );
+        let rbac = deployment(
+            "custom-core-release-rbac-manager",
+            "custom-system-namespace",
+            &["rbac", "start"],
+            "xpkg.crossplane.io/crossplane/crossplane:v2.2.1",
+            Some("2.2.1"),
+        );
+        let result = resolve_crossplane_version(&[rbac, controller]);
+        assert_eq!(result.version.as_deref(), Some("v2.2.1"));
+        assert_eq!(result.diagnostic, None);
+    }
+
+    #[test]
+    fn crossplane_controller_image_tag_is_used_when_label_is_missing() {
+        let controller = deployment(
+            "crossplane",
+            "non-default-namespace",
+            &["core", "start"],
+            "xpkg.crossplane.io/crossplane/crossplane:v2.2.1",
+            None,
+        );
+        assert_eq!(
+            resolve_crossplane_version(&[controller]).version.as_deref(),
+            Some("v2.2.1")
+        );
+    }
+
+    #[test]
+    fn provider_deployments_and_missing_crossplane_versions_are_diagnosed() {
+        let provider = deployment(
+            "provider-vcd",
+            "crossplane-system",
+            &["provider", "start"],
+            "harbor.example/provider-vcd:v1.0.0",
+            Some("1.0.0"),
+        );
+        let result = resolve_crossplane_version(&[provider]);
+        assert_eq!(result.version, None);
+        assert!(result
+            .diagnostic
+            .unwrap()
+            .contains("no controller Deployment"));
+
+        let unknown = deployment(
+            "crossplane",
+            "crossplane-system",
+            &["core", "start"],
+            "xpkg.crossplane.io/crossplane/crossplane:latest",
+            None,
+        );
+        let result = resolve_crossplane_version(&[unknown]);
+        assert_eq!(result.version, None);
+        assert!(result.diagnostic.unwrap().contains("no reliable version"));
+    }
+
+    #[test]
+    fn crossplane_version_discovery_reports_ambiguity_and_api_failure() {
+        let first = deployment(
+            "crossplane-a",
+            "ns-a",
+            &["core", "start"],
+            "crossplane:v2.2.1",
+            None,
+        );
+        let second = deployment(
+            "crossplane-b",
+            "ns-b",
+            &["core", "start"],
+            "crossplane:v2.2.1",
+            None,
+        );
+        assert!(resolve_crossplane_version(&[first, second])
+            .diagnostic
+            .unwrap()
+            .contains("refusing to choose"));
+        assert!(failed_crossplane_version_discovery("forbidden")
+            .diagnostic
+            .unwrap()
+            .contains("Deployments (forbidden)"));
     }
 }

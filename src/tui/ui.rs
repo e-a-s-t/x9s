@@ -23,7 +23,7 @@ use crate::{
         Kubernetes, Resource,
     },
     tui::{
-        app::{App, InputMode, ProviderEntry, View},
+        app::{App, InputMode, ProviderEntry, VersionCache, View},
         theme::{K9sDark, ThemeColor},
     },
 };
@@ -35,7 +35,8 @@ enum Update {
         resources: Vec<Resource>,
         graph: RelationshipGraph,
         warnings: Vec<String>,
-        versions: Option<(Option<String>, Option<String>)>,
+        provider_images: std::collections::HashMap<crate::core::ResourceId, String>,
+        versions: Option<Box<VersionCache>>,
     },
     EventsLoaded {
         events: Vec<Value>,
@@ -91,16 +92,21 @@ fn request_refresh(
         match client_result {
             Ok(client) => match client.list_managed_resources().await {
                 Ok(report) => {
-                    let warnings = report
+                    let warnings: Vec<String> = report
                         .errors
                         .iter()
                         .chain(report.relationship_errors.iter())
                         .map(|error| error.message.clone())
+                        .chain(report.provider_package_diagnostics.iter().cloned())
                         .collect();
                     let versions = if refresh_versions {
                         let (kubernetes, crossplane) =
                             tokio::join!(client.api_server_version(), client.crossplane_version(),);
-                        Some((kubernetes, crossplane))
+                        Some(Box::new(VersionCache {
+                            kubernetes,
+                            crossplane: crossplane.version,
+                            crossplane_diagnostic: crossplane.diagnostic,
+                        }))
                     } else {
                         None
                     };
@@ -109,6 +115,7 @@ fn request_refresh(
                         client,
                         resources: report.all_resources,
                         graph: report.graph,
+                        provider_images: report.provider_images,
                         warnings,
                         versions,
                     });
@@ -179,13 +186,15 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     resources,
                     graph,
                     warnings,
+                    provider_images,
                     versions,
                 } => {
                     app.context = context;
                     (app.cluster, app.user) = context_metadata(&app.context);
-                    app.cache_versions(versions);
+                    app.cache_versions(versions.map(|versions| *versions));
                     kube_client = Some(client);
                     app.replace_resources(resources, graph, warnings);
+                    app.provider_images = provider_images;
                     app.loading = false;
                     app.error = None;
                 }
@@ -954,11 +963,17 @@ fn set_tree_mode(app: &mut App, tree: bool) {
 }
 
 fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if area.width < 16 {
+        frame.render_widget(Paragraph::new("…"), area);
+        return;
+    }
     let entries = app.visible_provider_entries();
     let labels = provider_display_names(app);
     let narrow = area.width < 80;
-    let count_width = 4;
-    let rows = entries
+    let rows: Vec<_> = entries
         .iter()
         .filter_map(|entry| {
             let ProviderEntry::Config(id) = entry;
@@ -978,43 +993,59 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                         .and_then(Value::as_str)
                 })
                 .unwrap_or("-");
-            let status = match &resource.ready.status {
-                ConditionStatus::Missing => "Unknown",
-                _ => resource.ready.status.label(),
-            };
-            Some(provider_row(
+            let image = app
+                .provider_images
+                .get(id)
+                .map(String::as_str)
+                .unwrap_or("-");
+            Some((
                 labels
                     .get(id)
                     .map(String::as_str)
-                    .unwrap_or("ProviderConfig"),
-                provider,
+                    .unwrap_or("ProviderConfig")
+                    .to_owned(),
+                provider.to_owned(),
                 app.provider_resource_count(id),
-                status,
-                narrow,
-                count_width,
+                image.to_owned(),
             ))
         })
         .collect::<Vec<_>>();
-    let widths = if narrow {
-        vec![
-            Constraint::Percentage(68),
-            Constraint::Percentage(16),
-            Constraint::Percentage(16),
-        ]
-    } else {
-        vec![
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-        ]
-    };
-    let table = Table::new(rows, widths)
+    let column_widths = provider_column_widths(usize::from(area.width), &rows, !narrow);
+    let image_width = *column_widths.last().unwrap_or(&0);
+    let rendered_rows = rows
+        .iter()
+        .map(|(name, provider, count, image)| {
+            let provider_width = if narrow {
+                0
+            } else {
+                column_widths.get(1).copied().unwrap_or(0)
+            };
+            let count_width = column_widths
+                .get(if narrow { 1 } else { 2 })
+                .copied()
+                .unwrap_or(0);
+            provider_row(
+                &truncate(name, column_widths[0].saturating_sub(2)),
+                &truncate(provider, provider_width),
+                *count,
+                &truncate_image(image, image_width),
+                count_width,
+                !narrow,
+            )
+        })
+        .collect::<Vec<_>>();
+    let widths = column_widths
+        .iter()
+        .map(|width| Constraint::Length((*width).min(u16::MAX as usize) as u16))
+        .collect::<Vec<_>>();
+    let spacing = if area.width >= 40 { 2 } else { 0 };
+    let table = Table::new(rendered_rows, widths)
+        .column_spacing(spacing)
         .header(
             Row::new(if narrow {
-                vec!["NAME", "RESOURCES", "STATUS"]
+                vec!["NAME", "RESOURCES", "IMAGE"]
             } else {
-                vec!["NAME", "PROVIDER", "RESOURCES", "STATUS"]
+                vec!["NAME", "PROVIDER", "RESOURCES", "IMAGE"]
             })
             .style(
                 Style::default()
@@ -1067,34 +1098,114 @@ fn provider_display_names(app: &App) -> std::collections::HashMap<crate::core::R
     labels
 }
 
+fn provider_column_widths(
+    available_width: usize,
+    rows: &[(String, String, usize, String)],
+    show_provider: bool,
+) -> Vec<usize> {
+    let name_width = rows
+        .iter()
+        .map(|(name, _, _, _)| name.chars().count())
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 52)
+        + 2; // Reserve room for the selection marker in the first column.
+    let provider_width = rows
+        .iter()
+        .map(|(_, provider, _, _)| provider.chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 24);
+    let resource_width = rows
+        .iter()
+        .map(|(_, _, count, _)| count.to_string().len())
+        .max()
+        .unwrap_or(1)
+        .max("RESOURCES".len());
+    let image_width = rows
+        .iter()
+        .map(|(_, _, _, image)| image.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let mut content_widths = if show_provider {
+        vec![name_width, provider_width, resource_width]
+    } else {
+        vec![name_width, resource_width]
+    };
+    let spacing = if available_width >= 40 { 2 } else { 0 };
+    let gaps = spacing * content_widths.len(); // Includes the IMAGE column.
+    let budget = available_width.saturating_sub(gaps);
+    let mut overflow = content_widths
+        .iter()
+        .sum::<usize>()
+        .saturating_add(image_width)
+        .saturating_sub(budget);
+    let minima = if show_provider {
+        vec![6, 8, 9]
+    } else {
+        vec![6, 9]
+    };
+    for (index, minimum) in minima.iter().copied().enumerate() {
+        let reduction = overflow.min(content_widths[index].saturating_sub(minimum));
+        content_widths[index] -= reduction;
+        overflow -= reduction;
+        if overflow == 0 {
+            break;
+        }
+    }
+    if overflow > 0 && available_width < 40 {
+        for width in &mut content_widths {
+            let reduction = overflow.min(*width);
+            *width -= reduction;
+            overflow -= reduction;
+            if overflow == 0 {
+                break;
+            }
+        }
+    }
+    let image_column_width = budget.saturating_sub(content_widths.iter().sum::<usize>());
+    content_widths.push(image_column_width);
+    content_widths
+}
+
 fn provider_row(
     name: &str,
     provider: &str,
     count: usize,
-    status: &str,
-    narrow: bool,
+    image: &str,
     count_width: usize,
+    show_provider: bool,
 ) -> Row<'static> {
     let mut cells = vec![Cell::from(name.to_owned())];
-    if !narrow {
+    if show_provider {
         cells.push(Cell::from(provider.to_owned()));
     }
     cells.push(Cell::from(format!("{count:>count_width$}")));
-    cells.push(Cell::from(status_span(status)));
+    cells.push(Cell::from(Span::styled(
+        image.to_owned(),
+        Style::default().fg(K9sDark::color(ThemeColor::Muted)),
+    )));
     Row::new(cells)
 }
 
-fn status_span(status: &str) -> Span<'static> {
-    let color = match status {
-        "True" | "Healthy" => ThemeColor::Healthy,
-        "False" | "Degraded" => ThemeColor::Error,
-        "Unknown" => ThemeColor::Warning,
-        _ => ThemeColor::Muted,
-    };
-    Span::styled(
-        status.to_owned(),
-        Style::default().fg(K9sDark::color(color)),
-    )
+fn truncate_image(image: &str, width: usize) -> String {
+    if image.chars().count() <= width {
+        return image.to_owned();
+    }
+    if width < 2 {
+        return "…".chars().take(width).collect();
+    }
+    let tail: String = image
+        .chars()
+        .rev()
+        .take(width - 1)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("…{tail}")
 }
 
 fn draw_resources(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
@@ -1236,6 +1347,13 @@ fn draw_details(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout
         detail_pair("Kind", &resource.kind),
         detail_pair("Namespace", resource.namespace.as_deref().unwrap_or("-")),
         detail_pair("ProviderConfig", provider_config),
+        detail_pair(
+            "Provider Image",
+            app.provider_images
+                .get(&resource.id())
+                .map(String::as_str)
+                .unwrap_or("-"),
+        ),
         detail_pair(
             "External Name",
             resource.external_name.as_deref().unwrap_or("-"),
@@ -1651,6 +1769,10 @@ mod tests {
         }
         assert!(super::X9S_LOGO[3].starts_with(' '));
         assert!(output.lines().nth(8).unwrap().contains("PROVIDER CONFIGS"));
+        app.crossplane_version = Some("v2.2.1".into());
+        let (version_output, _) = rendered(&app, 160, 45);
+        assert!(version_output.contains("Crossplane:"));
+        assert!(version_output.contains("v2.2.1"));
         let (minimum_wide, _) = rendered(&app, 150, 10);
         assert!(minimum_wide.contains(super::X9S_LOGO[0]));
         let (too_narrow, _) = rendered(&app, 149, 10);
@@ -1702,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_without_ready_condition_displays_unknown() {
+    fn provider_selector_replaces_status_with_image() {
         let mut app = crate::tui::app::App::new("ctx".into());
         let mut config = test_resource("default");
         config.family = ResourceFamily::ProviderConfig;
@@ -1710,8 +1832,77 @@ mod tests {
         app.providers = vec![config.id()];
         app.resources = vec![config];
         let (output, _) = rendered(&app, 160, 30);
-        assert!(output.contains("Unknown"));
-        assert!(!output.contains("Missing"));
+        assert!(output.contains("IMAGE"));
+        assert!(!output.contains("STATUS"));
+    }
+
+    #[test]
+    fn long_provider_images_are_truncated_and_full_reference_is_retained() {
+        let full = "registry.example.com/team/provider-vcd:v1.0.0";
+        let shown = super::truncate_image(full, 14);
+        assert!(shown.starts_with('…'));
+        assert_eq!(shown.chars().count(), 14);
+        assert_eq!(super::truncate_image("short:v1", 14), "short:v1");
+    }
+
+    #[test]
+    fn provider_columns_are_content_sized_and_give_remaining_width_to_images() {
+        let image = "harbor.carekube.com/carekube/provider-vcd:dev-8634a2a2e85a";
+        let rows = vec![(
+            "ProviderConfig/default [vcd.carekube.com]".to_owned(),
+            "provider-vcd".to_owned(),
+            8,
+            image.to_owned(),
+        )];
+        let wide = super::provider_column_widths(160, &rows, true);
+        assert_eq!(wide[0], rows[0].0.chars().count() + 2);
+        assert_eq!(wide[1], rows[0].1.chars().count());
+        assert_eq!(wide[2], "RESOURCES".len());
+        assert!(wide[3] >= image.chars().count());
+        assert_eq!(wide.iter().sum::<usize>() + 6, 160);
+
+        let medium = super::provider_column_widths(100, &rows, true);
+        assert!(medium[0] < wide[0]);
+        assert!(medium[1] >= "PROVIDER".len());
+        assert_eq!(medium[2], "RESOURCES".len());
+        assert_eq!(medium.iter().sum::<usize>() + 6, 100);
+
+        let narrow = super::provider_column_widths(79, &rows, false);
+        assert_eq!(narrow.len(), 3);
+        assert!(narrow[2] > 0);
+        assert_eq!(narrow.iter().sum::<usize>() + 4, 79);
+    }
+
+    #[test]
+    fn resolved_provider_package_is_rendered_in_image_column() {
+        let mut app = crate::tui::app::App::new("ctx".into());
+        let mut config = test_resource("default");
+        config.family = ResourceFamily::ProviderConfig;
+        config.kind = "ProviderConfig".into();
+        config.group = "vcd.carekube.com".into();
+        let id = config.id();
+        app.replace_resources(vec![config], RelationshipGraph::default(), vec![]);
+        app.provider_images.insert(
+            id,
+            "harbor.carekube.com/carekube/provider-vcd:dev-8634a2a2e85a".into(),
+        );
+        app.loading = false;
+        let (output, _) = rendered(&app, 160, 30);
+        assert!(output.contains("IMAGE"));
+        assert!(output.contains("harbor.carekube.com/carekube/provider-vcd:dev-8634a2a2e85a"));
+        assert!(!output.contains("…"));
+        assert!(output.contains("dev-8634a2a2e85a"));
+        assert!(!output.contains("STATUS"));
+    }
+
+    #[test]
+    fn provider_selector_handles_a_terminal_too_narrow_for_columns() {
+        let mut app = crate::tui::app::App::new("ctx".into());
+        let mut config = test_resource("default");
+        config.family = ResourceFamily::ProviderConfig;
+        app.replace_resources(vec![config], RelationshipGraph::default(), vec![]);
+        let (output, _) = rendered(&app, 1, 12);
+        assert!(output.contains("…"));
     }
 
     #[test]
