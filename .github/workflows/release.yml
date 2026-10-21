@@ -70,10 +70,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          checksum_for() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
           stage="$(mktemp -d)"
           cp "target/${{ matrix.target }}/release/x9s" "$stage/x9s"
           tar -czf "${{ matrix.archive }}" -C "$stage" x9s
-          sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          checksum="$(checksum_for "${{ matrix.archive }}")"
+          printf '%s  %s\n' "$checksum" "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,8 +111,18 @@ jobs:
         working-directory: release-assets
         run: |
           set -euo pipefail
+          checksum_for() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
           test "$(find . -maxdepth 1 -name 'x9s-*.tar.gz' -type f | wc -l | tr -d ' ')" = 4
-          sha256sum x9s-*.tar.gz > SHA256SUMS
+          for archive in x9s-*.tar.gz; do
+            checksum="$(checksum_for "$archive")"
+            printf '%s  %s\n' "$checksum" "$archive"
+          done > SHA256SUMS
 
       - name: Create GitHub Release
         env:
