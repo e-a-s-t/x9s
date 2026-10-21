@@ -7,23 +7,24 @@
     "clippy@1.85.0",
     "rust-analyzer@2025-02-10",
     "cargo-edit@0.13.4",
-    "jq@1.7.1"
+    "jq@1.7.1",
+    "git@2.54.0"
   ],
   "shell": {
     "scripts": {
-      "build": "cargo build",
-      "release": "cargo build --release",
-      "run": "cargo run",
-      "test": "cargo test",
-      "fmt": "cargo fmt",
+      "build":     "cargo build",
+      "release":   "cargo build --release",
+      "run":       "cargo run",
+      "test":      "cargo test",
+      "fmt":       "cargo fmt",
       "fmt-check": "cargo fmt --check",
-      "lint": "cargo clippy --all-targets --all-features -- -D warnings",
-      "check": "cargo check",
-      "ci": "set -e; cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test",
-      "version": "cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == \"x9s\") | .version'",
-      "patch": "bash scripts/release-version.sh patch",
-      "minor": "bash scripts/release-version.sh minor",
-      "major": "bash scripts/release-version.sh major"
+      "lint":      "cargo clippy --all-targets --all-features -- -D warnings",
+      "check":     "cargo check",
+      "ci":        "set -e; cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test",
+      "version":   "cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == \"x9s\") | .version'",
+      "patch":     "bash scripts/release-version.sh patch",
+      "minor":     "bash scripts/release-version.sh minor",
+      "major":     "bash scripts/release-version.sh major"
     }
   }
 }

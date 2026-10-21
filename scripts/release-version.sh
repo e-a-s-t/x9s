@@ -12,6 +12,7 @@ case "$level" in
   *) fail 'usage: scripts/release-version.sh major|minor|patch' ;;
 esac
 
+command -v git >/dev/null 2>&1 || fail 'git is required in the Devbox environment'
 [[ "$(git branch --show-current)" == main ]] || fail 'must run on the main branch'
 [[ -z "$(git status --porcelain)" ]] || fail 'working tree must be clean'
 
