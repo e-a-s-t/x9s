@@ -1,18 +1,18 @@
 # GitHub CI and Delivery
 
-**Status: Devbox commands are implemented. No GitHub Actions workflow, release automation, or Homebrew formula is configured in this repository.**
+**Status: GitHub Actions CI and tagged releases use the repository's pinned Devbox environment. Homebrew publishing is not configured.**
 
 GitHub is the intended source code hosting and development platform. Pull requests are intended for code review, and GitHub Issues for bug reports and feature requests.
 
 ## CI
 
-Future GitHub Actions workflows should install Devbox and run the same project validation used locally:
+CI installs Devbox with Jetify's official GitHub Action and runs the same pinned toolchain used locally:
 
 ```bash
 devbox run ci
 ```
 
-This runs `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`, stopping if a step fails. No GitHub Actions workflow is added by the current tooling setup. Future CI may build optimized binaries for supported Linux and macOS targets; no cluster credentials are needed.
+CI runs formatting, Clippy, and tests through `devbox run -- cargo ...`; no separate Rust installation is used. No cluster credentials are needed.
 
 ## Versioning and release preparation
 
@@ -25,33 +25,22 @@ devbox run minor
 devbox run major
 ```
 
-The bump updates `Cargo.toml` and `Cargo.lock`, prints the old and new versions, and leaves changes uncommitted. Review the actual version before preparing a release. For example, if the command reports `0.1.0 -> 0.1.1`:
+Each bump requires a clean working tree on `main`, refuses an existing target tag, updates `Cargo.toml` and `Cargo.lock`, verifies the binary version, runs validation, stages only the version files, commits, and creates an annotated tag. For example:
 
 ```bash
-# Increment version
+# Create patch release
 devbox run patch
 
-# Validate
-devbox run ci
+# Review the release commit and tag
+git log -1
+git tag --list
 
-# Review changes
-git diff
-
-# Commit version changes (replace with the actual version)
-git add Cargo.toml Cargo.lock
-git commit -m "chore(release): bump version to 0.1.1"
-
-# Create an annotated tag (replace with the actual version)
-git tag -a v0.1.1 -m "Release v0.1.1"
-
-# Push commit and tag
-git push
+# Publish after review (replace with the actual version)
+git push origin main
 git push origin v0.1.1
 ```
 
-The example version and tag are illustrative; use the version printed by the bump command. Tags use a `v` prefix, such as `v0.1.0`, `v0.2.0`, or `v1.0.0`. Version bumping and publishing are separate operations. Bump commands never create commits or tags, push changes, or publish a release.
-
-A future `devbox run publish` command is planned to verify a clean working tree, run validation, verify the Cargo version, create an annotated Git tag, push the commit and tag, and trigger the GitHub release workflow. It is not implemented.
+Use `devbox run minor` or `devbox run major` for those release levels. The tag triggers release validation, four native platform builds through Devbox, checksum generation, and GitHub Release publication. Release publication waits for every build to succeed.
 
 ## Distribution
 

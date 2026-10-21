@@ -72,7 +72,15 @@ devbox run minor
 devbox run major
 ```
 
-Each bump reports the old and new versions and leaves changes in the working tree for review. For example, a patch bump of `0.1.0` produces `0.1.1`; a minor bump of `0.1.1` produces `0.2.0`; a major bump of `0.2.0` produces `1.0.0`. These commands do not commit, tag, push, or publish. Keep version bumping separate from release publishing.
+Each command requires a clean working tree on `main` and refuses an existing
+target tag. It updates `Cargo.toml` and `Cargo.lock`, verifies `x9s --version`,
+runs formatting, Clippy, and tests, then stages only those two files, creates
+`chore(release): bump version to <version>`, and adds an annotated `v<version>`
+tag pointing to that commit. A failed update or validation stops before commit
+and tag creation. For example, `0.1.0` becomes `1.0.0`, `0.2.0`, or `0.1.1`
+with `major`, `minor`, or `patch`; `1.2.3` becomes `2.0.0`, `1.3.0`, or
+`1.2.4`. Nothing is pushed automatically. Review the commit and publish with
+`git push origin main` followed by `git push origin v<version>`.
 
 ## Dependencies and conventions
 

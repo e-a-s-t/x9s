@@ -28,20 +28,22 @@ use crate::{
     },
 };
 
+struct LoadedUpdate {
+    client: Kubernetes,
+    context: String,
+    resources: Vec<Resource>,
+    graph: RelationshipGraph,
+    warnings: Vec<String>,
+    provider_images: std::collections::HashMap<crate::core::ResourceId, String>,
+    provider_identities: std::collections::HashMap<
+        crate::core::ResourceId,
+        crate::core::kubernetes::ProviderIdentity,
+    >,
+    versions: Option<Box<VersionCache>>,
+}
+
 enum Update {
-    Loaded {
-        client: Kubernetes,
-        context: String,
-        resources: Vec<Resource>,
-        graph: RelationshipGraph,
-        warnings: Vec<String>,
-        provider_images: std::collections::HashMap<crate::core::ResourceId, String>,
-        provider_identities: std::collections::HashMap<
-            crate::core::ResourceId,
-            crate::core::kubernetes::ProviderIdentity,
-        >,
-        versions: Option<Box<VersionCache>>,
-    },
+    Loaded(Box<LoadedUpdate>),
     EventsLoaded {
         events: Vec<Value>,
     },
@@ -132,7 +134,7 @@ fn request_refresh(
                     } else {
                         None
                     };
-                    let _ = tx.send(Update::Loaded {
+                    let _ = tx.send(Update::Loaded(Box::new(LoadedUpdate {
                         context: client.context.clone(),
                         client,
                         resources: report.all_resources,
@@ -141,7 +143,7 @@ fn request_refresh(
                         provider_identities: report.provider_identities,
                         warnings,
                         versions,
-                    });
+                    })));
                 }
                 Err(error) => {
                     let _ = tx.send(Update::Failed {
@@ -290,16 +292,17 @@ pub async fn run(context: Option<&str>) -> Result<()> {
         terminal.draw(|frame| draw(frame, &app))?;
         while let Ok(update) = rx.try_recv() {
             match update {
-                Update::Loaded {
-                    client,
-                    context,
-                    resources,
-                    graph,
-                    warnings,
-                    provider_images,
-                    provider_identities,
-                    versions,
-                } => {
+                Update::Loaded(loaded) => {
+                    let LoadedUpdate {
+                        client,
+                        context,
+                        resources,
+                        graph,
+                        warnings,
+                        provider_images,
+                        provider_identities,
+                        versions,
+                    } = *loaded;
                     app.context = context;
                     (app.cluster, app.user) = context_metadata(&app.context);
                     app.cache_versions(versions.map(|versions| *versions));

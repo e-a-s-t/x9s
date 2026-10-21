@@ -51,12 +51,34 @@ On macOS, use `shasum -a 256 -c SHA256SUMS` to check the checksum file.
 
 ## Releases for maintainers
 
-Update the package version in `Cargo.toml` and `Cargo.lock`, commit the change,
-then push a version tag such as `v0.1.1`. The release workflow runs formatting,
-Clippy, and tests, builds all four platform archives, and publishes them with a
-`SHA256SUMS` file and automatically generated release notes. A manual workflow
-run must target a version tag. Do not publish a tag until its version matches
-the package version.
+Use Devbox to create a semantic version bump. The command checks for a clean
+working tree on `main`, updates `Cargo.toml` and `Cargo.lock`, verifies the
+reported version, runs formatting, Clippy, and tests, then creates a release
+commit and annotated tag locally. It never pushes:
+
+```bash
+# Patch: 0.1.0 -> 0.1.1
+devbox run patch
+
+# Minor: 0.1.1 -> 0.2.0
+devbox run minor
+
+# Major: 0.2.0 -> 1.0.0
+devbox run major
+
+# Review the release commit and tag
+git log -1
+git tag --list
+
+# Publish the reviewed commit and tag (replace with the actual version)
+git push origin main
+git push origin v0.1.1
+```
+
+The tag triggers GitHub Actions. The release workflow verifies that the tag
+matches the Cargo package version, validates the source, builds all four
+platform archives through Devbox, computes SHA256 checksums, and publishes a
+GitHub Release after all builds succeed.
 
 The browser lists confirmed Managed Resources by default. Use `/` to filter, `Enter` to inspect details, `r` to refresh, and `q` to exit. See [usage](docs/usage.md) for keyboard controls and [Crossplane compatibility](docs/crossplane.md) for discovery and classification behavior.
 

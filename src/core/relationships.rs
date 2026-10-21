@@ -420,12 +420,11 @@ fn explicit_edge(
         .get("namespace")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let namespace = explicit_namespace
-        .clone()
-        .or_else(|| from.namespace.clone());
+    let has_explicit_namespace = explicit_namespace.is_some();
+    let namespace = explicit_namespace.or_else(|| from.namespace.clone());
     let address = (api.to_owned(), kind.to_owned(), namespace, name.to_owned());
     let to = by_address.get(&address).cloned().or_else(|| {
-        if explicit_namespace.is_some() {
+        if has_explicit_namespace {
             return None;
         }
         by_address

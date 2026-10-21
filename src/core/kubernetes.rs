@@ -59,37 +59,33 @@ fn is_owned_by(object: &Value, kind: &str, uid: &str) -> bool {
 }
 
 fn active_revision<'a>(revisions: &'a [Value], provider_uid: &str) -> Result<&'a Value> {
-    let active: Vec<_> = revisions
-        .iter()
-        .filter(|revision| {
-            revision
-                .pointer("/spec/desiredState")
-                .and_then(Value::as_str)
-                == Some("Active")
-                && is_owned_by(revision, "Provider", provider_uid)
-        })
-        .collect();
-    match active.as_slice() {
-        [revision] => Ok(revision),
-        [] => anyhow::bail!("No active ProviderRevision is owned by Provider UID {provider_uid}"),
-        _ => anyhow::bail!(
-            "Multiple active ProviderRevisions are owned by Provider UID {provider_uid}"
-        ),
+    let mut active = revisions.iter().filter(|revision| {
+        revision
+            .pointer("/spec/desiredState")
+            .and_then(Value::as_str)
+            == Some("Active")
+            && is_owned_by(revision, "Provider", provider_uid)
+    });
+    let revision = active.next().ok_or_else(|| {
+        anyhow::anyhow!("No active ProviderRevision is owned by Provider UID {provider_uid}")
+    })?;
+    if active.next().is_some() {
+        anyhow::bail!("Multiple active ProviderRevisions are owned by Provider UID {provider_uid}");
     }
+    Ok(revision)
 }
 
 fn owned_object<'a>(objects: &'a [Value], kind: &str, owner_uid: &str) -> Result<&'a Value> {
-    let matches: Vec<_> = objects
+    let mut matches = objects
         .iter()
-        .filter(|object| is_owned_by(object, kind, owner_uid))
-        .collect();
-    match matches.as_slice() {
-        [object] => Ok(object),
-        [] => anyhow::bail!("No controller Deployment is owned by the active ProviderRevision"),
-        _ => anyhow::bail!(
-            "Multiple controller Deployments are owned by the active ProviderRevision"
-        ),
+        .filter(|object| is_owned_by(object, kind, owner_uid));
+    let object = matches.next().ok_or_else(|| {
+        anyhow::anyhow!("No controller Deployment is owned by the active ProviderRevision")
+    })?;
+    if matches.next().is_some() {
+        anyhow::bail!("Multiple controller Deployments are owned by the active ProviderRevision");
     }
+    Ok(object)
 }
 
 #[derive(Clone, Debug, Serialize)]

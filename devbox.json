@@ -21,9 +21,9 @@
       "check": "cargo check",
       "ci": "set -e; cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test",
       "version": "cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == \"x9s\") | .version'",
-      "patch": "bash scripts/version-bump.sh patch",
-      "minor": "bash scripts/version-bump.sh minor",
-      "major": "bash scripts/version-bump.sh major"
+      "patch": "bash scripts/release-version.sh patch",
+      "minor": "bash scripts/release-version.sh minor",
+      "major": "bash scripts/release-version.sh major"
     }
   }
 }

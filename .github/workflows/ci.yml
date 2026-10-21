@@ -18,17 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Devbox
+        uses: jetify-com/devbox-install-action@v0.12.0
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: devbox run -- cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: devbox run -- cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: devbox run -- cargo test --workspace
