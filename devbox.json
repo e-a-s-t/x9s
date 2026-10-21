@@ -10,6 +10,9 @@
     "jq@1.7.1",
     "git@2.54.0"
   ],
+  "nixpkgs": {
+    "commit": "329c3d2af6d1b618705150ea39f72c15eb4e613e"
+  },
   "shell": {
     "scripts": {
       "build":     "cargo build",

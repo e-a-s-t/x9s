@@ -18,7 +18,7 @@ cargo build
 cargo run
 ```
 
-Devbox supports the configured macOS Apple Silicon and Intel, and Linux x86_64 and ARM64 systems where the pinned Nix packages are available. No Docker or globally installed Rust toolchain is required.
+Devbox supports the configured macOS Apple Silicon and Intel, and Linux x86_64 and ARM64 systems where the pinned Nix packages are available. `devbox.json` pins the Nixpkgs revision because newer Nixpkgs releases have dropped `x86_64-darwin` support. No Docker or globally installed Rust toolchain is required.
 
 ## Commands
 
