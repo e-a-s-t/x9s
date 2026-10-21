@@ -67,6 +67,8 @@ The initial screen lists discovered ProviderConfigs, All Providers, Unassigned r
 | `j` / `Down` | Select the next resource |
 | `k` / `Up` | Select the previous resource |
 | `Enter` | Open selected ProviderConfig/resource; in details, open the selected related resource |
+| `l` | Open logs for the selected ProviderConfig's associated Provider |
+| `y` | Inspect the selected ProviderConfig YAML, redacted by default |
 | `Esc` | Return through navigation history |
 | `/` | Filter the current ProviderConfig or resource view |
 | `:` | Enter a command |
@@ -74,7 +76,7 @@ The initial screen lists discovered ProviderConfigs, All Providers, Unassigned r
 | `t` | Toggle tree and flat resource views |
 | `h` / `Left` | Collapse the selected tree node |
 | `l` / `Right` | Expand the selected tree node |
-| `y` | Show sanitized resource YAML from details |
+| `y` | Show the actual selected resource YAML with sensitive values redacted |
 | `d` | Describe the selected resource from details |
 | `e` | Load Kubernetes Events from details |
 | `r` | Refresh resources while preserving navigation state |
@@ -83,6 +85,8 @@ The initial screen lists discovered ProviderConfigs, All Providers, Unassigned r
 | `Ctrl+C` | Exit |
 
 In details, `j`/`k` selects a related resource and `Enter` navigates to it. `/` filters ProviderConfigs by identity/status and resources by name, kind, namespace, or status. Commands are `:providers`, `:all`, `:tree`, `:flat`, `:system`, `:health`, and `:context`; use `:context <name>` to switch kubeconfig contexts.
+
+In ProviderConfig YAML, press `x` to explicitly reveal values present in the object; a warning is shown, and reopening YAML restores redaction. Referenced Secrets are never fetched. In Provider logs, `f` pauses or resumes following, `Tab`/`Shift+Tab` switches running Pods, `/` searches, and `g`/`G` jumps to the start/end. Logs show one Pod at a time and return to the same ProviderConfig selector row with `Esc`.
 
 The details view shows API identity, namespace, UID, external name when available, Ready and Synced conditions, and discovered relationships. YAML and describe output redact Secret payload fields and credential-like keys. Event listing is asynchronous and follows Kubernetes RBAC.
 

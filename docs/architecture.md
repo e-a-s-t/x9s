@@ -1,12 +1,12 @@
 # Architecture
 
-**Status: ProviderConfig navigation and relationship graph implemented; see limitations below.**
+**Status: ProviderConfig navigation, relationship graph, Provider logs, and redacted YAML inspection implemented; see limitations below.**
 
 ## Layers
 
 1. **Core discovery:** kube-rs loads installed CRDs, resolves served group/version/kind/plural/scope through Kubernetes API discovery, lists CRD objects asynchronously, fetches exact authoritative referenced targets when needed, normalizes status and identity, and reports partial failures. Successful API discovery is cached on the reusable Kubernetes client between refreshes.
 2. **Relationship graph:** Core builds typed edges from Crossplane composition resource references, Kubernetes owner references, fully qualified resource references, resolvable label selectors, ProviderConfig references, and schema-backed provider relationships. ProviderConfig references use explicit API identity, CRD schema kind defaults, provider ownership, and Crossplane API model context; ambiguous references stay unresolved. The graph is global and independent of TUI state.
-3. **TUI:** Ratatui renders ProviderConfig selection, resource list/tree, details, YAML, Events, and describe views. Crossterm input updates navigation, history, filtering, expansion, and refresh state. Rendering does not issue Kubernetes requests; Events and refresh are asynchronous Core operations.
+3. **TUI:** Ratatui renders ProviderConfig selection, resource list/tree, details, YAML, Provider logs, Events, and describe views. Crossterm input updates navigation, history, filtering, expansion, and refresh state. Rendering does not issue Kubernetes requests; YAML retrieval, log setup/following, Events, and refresh are asynchronous Core operations. Leaving the log viewer cancels its stream.
 4. **CLI:** clap continues to expose Managed Resource listing and diagnostics using the same normalized Core report. The TUI's broader object set does not change the CLI data contract.
 
 ## Identity and discovery
@@ -21,7 +21,7 @@ The graph preserves `COMPOSES`, `MANAGED_BY`, `REFERENCES`, `OWNS`, `SELECTS`, a
 
 ## TUI behavior
 
-The initial screen lists actual ProviderConfig objects only. Selector identities retain API group, kind, namespace, and name; display qualifiers disambiguate duplicate names. Counts are unique managed-resource instances, independent of edge or tree multiplicity. ProviderConfig health uses its explicit Ready condition when present and reports Unknown when health is absent. The header shows the Cargo package version and cached Kubernetes and Crossplane versions; unavailable versions display as n/a and are refreshed after context changes. Resource navigation supports tree and flat modes, filtering, details, sanitized YAML, Kubernetes Events, describe output, health filtering, command mode, and navigation history. `:system` opens the Crossplane diagnostic object inventory. YAML redacts Secret data/stringData and credential-like fields before rendering.
+The initial screen lists actual ProviderConfig objects only. Selector identities retain API group, kind, namespace, and name; display qualifiers disambiguate duplicate names. Counts are unique managed-resource instances, independent of edge or tree multiplicity. ProviderConfig health uses its explicit Ready condition when present and reports Unknown when health is absent. The header shows the Cargo package version and cached Kubernetes and Crossplane versions; unavailable versions display as n/a and are refreshed after context changes. Resource navigation supports tree and flat modes, filtering, details, sanitized YAML, Provider logs, Kubernetes Events, describe output, health filtering, command mode, and navigation history. `:system` opens the Crossplane diagnostic object inventory. YAML fetches the current object and redacts Secret data/stringData and credential-like values before rendering; explicit reveal is local to the viewer. The selector’s Provider association supplies the Provider UID for log discovery. The Core follows Provider and ProviderRevision owner references by UID through Deployment, ReplicaSet, and Pod, and shows one Pod at a time.
 
 ## Limitations
 

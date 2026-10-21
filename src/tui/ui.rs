@@ -36,6 +36,10 @@ enum Update {
         graph: RelationshipGraph,
         warnings: Vec<String>,
         provider_images: std::collections::HashMap<crate::core::ResourceId, String>,
+        provider_identities: std::collections::HashMap<
+            crate::core::ResourceId,
+            crate::core::kubernetes::ProviderIdentity,
+        >,
         versions: Option<Box<VersionCache>>,
     },
     EventsLoaded {
@@ -43,6 +47,24 @@ enum Update {
     },
     EventsFailed {
         message: String,
+    },
+    YamlLoaded {
+        object: Value,
+    },
+    ViewerFailed {
+        message: String,
+    },
+    LogsReady {
+        provider: String,
+        pods: Vec<crate::core::kubernetes::ProviderPod>,
+        initial: String,
+    },
+    PodLogsReady {
+        index: usize,
+        initial: String,
+    },
+    LogLine {
+        line: Result<String, String>,
     },
     Failed {
         context: Option<String>,
@@ -116,6 +138,7 @@ fn request_refresh(
                         resources: report.all_resources,
                         graph: report.graph,
                         provider_images: report.provider_images,
+                        provider_identities: report.provider_identities,
                         warnings,
                         versions,
                     });
@@ -169,12 +192,99 @@ fn request_events(
     });
 }
 
+fn request_yaml(tx: mpsc::UnboundedSender<Update>, client: Kubernetes, resource: Resource) {
+    tokio::spawn(async move {
+        match client.get_object(&resource).await {
+            Ok(object) => {
+                let _ = tx.send(Update::YamlLoaded { object });
+            }
+            Err(error) => {
+                let _ = tx.send(Update::ViewerFailed {
+                    message: format!("Could not load YAML: {error}"),
+                });
+            }
+        }
+    });
+}
+
+fn request_logs(
+    tx: mpsc::UnboundedSender<Update>,
+    client: Kubernetes,
+    provider: crate::core::kubernetes::ProviderIdentity,
+) {
+    tokio::spawn(async move {
+        match client.provider_pods(&provider).await {
+            Ok(pods) => match client.pod_logs(&pods[0], false).await {
+                Ok(initial) => {
+                    let _ = tx.send(Update::LogsReady {
+                        provider: provider.name,
+                        pods,
+                        initial,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(Update::ViewerFailed {
+                        message: format!("Could not read Provider Pod logs: {error}"),
+                    });
+                }
+            },
+            Err(error) => {
+                let _ = tx.send(Update::ViewerFailed {
+                    message: format!("Could not resolve Provider logs: {error}"),
+                });
+            }
+        }
+    });
+}
+
+fn request_pod_logs(
+    tx: mpsc::UnboundedSender<Update>,
+    client: Kubernetes,
+    pod: crate::core::kubernetes::ProviderPod,
+    index: usize,
+) {
+    tokio::spawn(async move {
+        match client.pod_logs(&pod, false).await {
+            Ok(initial) => {
+                let _ = tx.send(Update::PodLogsReady { index, initial });
+            }
+            Err(error) => {
+                let _ = tx.send(Update::ViewerFailed {
+                    message: format!("Could not read Pod logs: {error}"),
+                });
+            }
+        }
+    });
+}
+
+fn start_log_follow(
+    tx: mpsc::UnboundedSender<Update>,
+    client: Kubernetes,
+    pod: crate::core::kubernetes::ProviderPod,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+        let follow = tokio::spawn(async move {
+            if let Err(error) = client.follow_pod_logs(pod, line_tx.clone()).await {
+                let _ = line_tx.send(Err(format!("{error}")));
+            }
+        });
+        while let Some(line) = line_rx.recv().await {
+            if tx.send(Update::LogLine { line }).is_err() {
+                break;
+            }
+        }
+        follow.abort();
+    })
+}
+
 pub async fn run(context: Option<&str>) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new("loading kubeconfig".into());
     let mut kube_client = None;
+    let mut log_task: Option<tokio::task::JoinHandle<()>> = None;
     request_refresh(tx.clone(), context.map(str::to_owned), None);
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
@@ -187,6 +297,7 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     graph,
                     warnings,
                     provider_images,
+                    provider_identities,
                     versions,
                 } => {
                     app.context = context;
@@ -195,6 +306,7 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     kube_client = Some(client);
                     app.replace_resources(resources, graph, warnings);
                     app.provider_images = provider_images;
+                    app.provider_identities = provider_identities;
                     app.loading = false;
                     app.error = None;
                 }
@@ -206,6 +318,63 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     app.events.clear();
                     app.error = Some(message);
                 }
+                Update::YamlLoaded { object } => {
+                    app.yaml_object = Some(object);
+                    app.yaml_revealed = false;
+                    app.detail_scroll = 0;
+                    app.error = None;
+                }
+                Update::ViewerFailed { message } => {
+                    app.error = Some(message);
+                }
+                Update::LogsReady {
+                    provider,
+                    pods,
+                    initial,
+                } => {
+                    if let Some(task) = log_task.take() {
+                        task.abort();
+                    }
+                    app.log_provider = Some(provider);
+                    app.log_pods = pods;
+                    app.log_pod_selected = 0;
+                    app.logs = initial.lines().map(str::to_owned).collect();
+                    app.detail_scroll =
+                        app.logs.len().saturating_sub(1).min(u16::MAX as usize) as u16;
+                    app.log_following = true;
+                    app.error = None;
+                    if let (Some(client), Some(pod)) =
+                        (kube_client.clone(), app.log_pods.first().cloned())
+                    {
+                        log_task = Some(start_log_follow(tx.clone(), client, pod));
+                    }
+                }
+                Update::PodLogsReady { index, initial } => {
+                    if let Some(task) = log_task.take() {
+                        task.abort();
+                    }
+                    app.log_pod_selected = index;
+                    app.logs = initial.lines().map(str::to_owned).collect();
+                    app.detail_scroll =
+                        app.logs.len().saturating_sub(1).min(u16::MAX as usize) as u16;
+                    app.log_following = true;
+                    app.error = None;
+                    if let (Some(client), Some(pod)) =
+                        (kube_client.clone(), app.log_pods.get(index).cloned())
+                    {
+                        log_task = Some(start_log_follow(tx.clone(), client, pod));
+                    }
+                }
+                Update::LogLine { line } => match line {
+                    Ok(line) => {
+                        app.logs.push(line);
+                        if app.log_following {
+                            app.detail_scroll =
+                                app.logs.len().saturating_sub(1).min(u16::MAX as usize) as u16;
+                        }
+                    }
+                    Err(message) => app.error = Some(format!("Log stream interrupted: {message}")),
+                },
                 Update::Failed { context, message } => {
                     if let Some(context) = context {
                         app.context = context;
@@ -232,7 +401,28 @@ pub async fn run(context: Option<&str>) -> Result<()> {
                     context.map(str::to_owned),
                     kube_client.clone(),
                 ) {
+                    if let Some(task) = log_task.take() {
+                        task.abort();
+                    }
                     break;
+                }
+                if app.view == View::Logs && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                    if let Some(task) = log_task.take() {
+                        task.abort();
+                    }
+                }
+                if app.view != View::Logs || !app.log_following {
+                    if let Some(task) = log_task.take() {
+                        task.abort();
+                    }
+                }
+                if app.view == View::Logs && app.log_following && log_task.is_none() {
+                    if let (Some(client), Some(pod)) = (
+                        kube_client.clone(),
+                        app.log_pods.get(app.log_pod_selected).cloned(),
+                    ) {
+                        log_task = Some(start_log_follow(tx.clone(), client, pod));
+                    }
                 }
             }
         }
@@ -271,7 +461,14 @@ fn handle_key(
             KeyCode::Enter => {
                 let submitted = app.input.trim().to_owned();
                 match app.input_mode {
-                    InputMode::Filter => app.filter = app.input.clone(),
+                    InputMode::Filter => {
+                        if matches!(app.view, View::Yaml | View::Logs) {
+                            app.viewer_search = app.input.clone();
+                            app.detail_scroll = 0;
+                        } else {
+                            app.filter = app.input.clone();
+                        }
+                    }
                     InputMode::Command => {
                         execute_command(app, &submitted, tx.clone(), connected.clone())
                     }
@@ -279,7 +476,9 @@ fn handle_key(
                 }
                 app.input.clear();
                 app.input_mode = InputMode::None;
-                app.selected = 0;
+                if !matches!(app.view, View::Yaml | View::Logs) {
+                    app.selected = 0;
+                }
             }
             KeyCode::Backspace => {
                 app.input.pop();
@@ -290,87 +489,160 @@ fn handle_key(
         return false;
     }
     match app.view {
-        View::Details | View::Yaml | View::Events | View::Describe | View::Help => match key {
-            KeyCode::Esc | KeyCode::Left => app.back(),
-            KeyCode::Char('q') => return true,
-            KeyCode::Char(':') => {
-                app.input_mode = InputMode::Command;
-                app.input.clear();
-            }
-            KeyCode::Char('?') => {
-                app.push_history();
-                app.view = View::Help;
-            }
-            KeyCode::Down | KeyCode::Char('j') if app.view == View::Details => {
-                let len = app.related_resource_ids().len();
-                if len > 0 {
-                    app.related_selected = (app.related_selected + 1).min(len - 1);
+        View::Details | View::Yaml | View::Events | View::Describe | View::Help | View::Logs => {
+            match key {
+                KeyCode::Esc | KeyCode::Left => app.back(),
+                KeyCode::Char('q') => return true,
+                KeyCode::Char(':') => {
+                    app.input_mode = InputMode::Command;
+                    app.input.clear();
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j')
-                if matches!(app.view, View::Yaml | View::Describe | View::Events) =>
-            {
-                app.detail_scroll = app.detail_scroll.saturating_add(1);
-            }
-            KeyCode::Up | KeyCode::Char('k') if app.view == View::Details => {
-                app.related_selected = app.related_selected.saturating_sub(1);
-            }
-            KeyCode::Up | KeyCode::Char('k')
-                if matches!(app.view, View::Yaml | View::Describe | View::Events) =>
-            {
-                app.detail_scroll = app.detail_scroll.saturating_sub(1);
-            }
-            KeyCode::Enter if app.view == View::Details => {
-                if let Some(target) = app
-                    .related_resource_ids()
-                    .get(app.related_selected)
-                    .cloned()
+                KeyCode::Char('?') => {
+                    app.push_history();
+                    app.view = View::Help;
+                }
+                KeyCode::Down | KeyCode::Char('j') if app.view == View::Details => {
+                    let len = app.related_resource_ids().len();
+                    if len > 0 {
+                        app.related_selected = (app.related_selected + 1).min(len - 1);
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j')
+                    if matches!(
+                        app.view,
+                        View::Yaml | View::Describe | View::Events | View::Logs
+                    ) =>
                 {
-                    app.push_history();
-                    app.selected_provider = app.graph.relationships.iter().find_map(|edge| {
-                        (edge.relation == crate::core::RelationshipType::ManagedBy
-                            && edge.from == target)
-                            .then(|| edge.to.clone())
-                            .flatten()
-                    });
-                    app.unassigned_only = false;
-                    app.unresolved_only = false;
-                    app.view = View::Resources;
-                    app.selected = app
-                        .visible_indices()
-                        .iter()
-                        .position(|index| app.resources[*index].id() == target)
-                        .unwrap_or(0);
-                    app.related_selected = 0;
+                    app.detail_scroll = app.detail_scroll.saturating_add(1);
                 }
-            }
-            KeyCode::Char('y') if app.view == View::Details => {
-                app.push_history();
-                app.view = View::Yaml;
-            }
-            KeyCode::Char('e') if app.view == View::Details => {
-                if let Some(resource) = app.selected_resource().cloned() {
-                    app.events.clear();
-                    app.push_history();
-                    app.view = View::Events;
-                    request_events(tx, context, connected.clone(), resource);
+                KeyCode::Up | KeyCode::Char('k') if app.view == View::Details => {
+                    app.related_selected = app.related_selected.saturating_sub(1);
                 }
+                KeyCode::Up | KeyCode::Char('k')
+                    if matches!(
+                        app.view,
+                        View::Yaml | View::Describe | View::Events | View::Logs
+                    ) =>
+                {
+                    app.detail_scroll = app.detail_scroll.saturating_sub(1);
+                }
+                KeyCode::Enter if app.view == View::Details => {
+                    if let Some(target) = app
+                        .related_resource_ids()
+                        .get(app.related_selected)
+                        .cloned()
+                    {
+                        app.push_history();
+                        app.selected_provider = app.graph.relationships.iter().find_map(|edge| {
+                            (edge.relation == crate::core::RelationshipType::ManagedBy
+                                && edge.from == target)
+                                .then(|| edge.to.clone())
+                                .flatten()
+                        });
+                        app.unassigned_only = false;
+                        app.unresolved_only = false;
+                        app.view = View::Resources;
+                        app.selected = app
+                            .visible_indices()
+                            .iter()
+                            .position(|index| app.resources[*index].id() == target)
+                            .unwrap_or(0);
+                        app.related_selected = 0;
+                    }
+                }
+                KeyCode::Char('y') if app.view == View::Details => {
+                    let resource = app.selected_resource().cloned();
+                    app.push_history();
+                    app.view = View::Yaml;
+                    app.yaml_object = resource.as_ref().map(|r| r.original.clone());
+                    app.yaml_revealed = false;
+                    if let (Some(client), Some(resource)) = (connected.clone(), resource) {
+                        request_yaml(tx.clone(), client, resource);
+                    }
+                }
+                KeyCode::Char('x') if app.view == View::Yaml => {
+                    app.yaml_revealed = !app.yaml_revealed;
+                }
+                KeyCode::Char('f') if app.view == View::Logs => {
+                    app.log_following = !app.log_following;
+                }
+                KeyCode::Tab if app.view == View::Logs && app.log_pods.len() > 1 => {
+                    app.log_following = false;
+                    let index = (app.log_pod_selected + 1) % app.log_pods.len();
+                    if let (Some(client), Some(pod)) =
+                        (connected.clone(), app.log_pods.get(index).cloned())
+                    {
+                        request_pod_logs(tx.clone(), client, pod, index);
+                    }
+                }
+                KeyCode::BackTab if app.view == View::Logs && app.log_pods.len() > 1 => {
+                    app.log_following = false;
+                    let index = if app.log_pod_selected == 0 {
+                        app.log_pods.len() - 1
+                    } else {
+                        app.log_pod_selected - 1
+                    };
+                    if let (Some(client), Some(pod)) =
+                        (connected.clone(), app.log_pods.get(index).cloned())
+                    {
+                        request_pod_logs(tx.clone(), client, pod, index);
+                    }
+                }
+                KeyCode::Char('/') if matches!(app.view, View::Yaml | View::Logs) => {
+                    app.input_mode = InputMode::Filter;
+                    app.input = app.viewer_search.clone();
+                }
+                KeyCode::Char('g') if matches!(app.view, View::Yaml | View::Logs) => {
+                    app.detail_scroll = 0
+                }
+                KeyCode::Char('G') if app.view == View::Yaml => {
+                    app.detail_scroll = app
+                        .yaml_object
+                        .as_ref()
+                        .and_then(|value| {
+                            let rendered = if app.yaml_revealed {
+                                serde_yaml::to_string(value).ok()
+                            } else {
+                                sanitized_yaml(value).ok()
+                            }?;
+                            Some(
+                                rendered
+                                    .lines()
+                                    .count()
+                                    .saturating_sub(1)
+                                    .min(u16::MAX as usize) as u16,
+                            )
+                        })
+                        .unwrap_or(0)
+                }
+                KeyCode::Char('G') if app.view == View::Logs => {
+                    app.detail_scroll =
+                        app.logs.len().saturating_sub(1).min(u16::MAX as usize) as u16
+                }
+                KeyCode::Char('e') if app.view == View::Details => {
+                    if let Some(resource) = app.selected_resource().cloned() {
+                        app.events.clear();
+                        app.push_history();
+                        app.view = View::Events;
+                        request_events(tx, context, connected.clone(), resource);
+                    }
+                }
+                KeyCode::Char('d') if app.view == View::Details => {
+                    app.push_history();
+                    app.view = View::Describe;
+                }
+                KeyCode::Char('p') => {
+                    app.push_history();
+                    app.view = View::Providers;
+                    app.selected = 0;
+                }
+                KeyCode::Char('r') => {
+                    app.loading = true;
+                    request_refresh(tx, context, connected.clone());
+                }
+                _ => {}
             }
-            KeyCode::Char('d') if app.view == View::Details => {
-                app.push_history();
-                app.view = View::Describe;
-            }
-            KeyCode::Char('p') => {
-                app.push_history();
-                app.view = View::Providers;
-                app.selected = 0;
-            }
-            KeyCode::Char('r') => {
-                app.loading = true;
-                request_refresh(tx, context, connected.clone());
-            }
-            _ => {}
-        },
+        }
         View::Providers => match key {
             KeyCode::Char('q') => return true,
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
@@ -386,6 +658,42 @@ fn handle_key(
                 }
                 app.view = View::Resources;
                 app.selected = 0;
+            }
+            KeyCode::Char('y') | KeyCode::Char('l') => {
+                if let Some(resource) = app.selected_provider_config().cloned() {
+                    app.push_history();
+                    app.error = None;
+                    app.detail_scroll = 0;
+                    app.viewer_search.clear();
+                    if key == KeyCode::Char('y') {
+                        app.view = View::Yaml;
+                        app.yaml_object = Some(resource.original.clone());
+                        app.yaml_revealed = false;
+                        if let Some(client) = connected.clone() {
+                            request_yaml(tx.clone(), client, resource);
+                        }
+                    } else {
+                        app.view = View::Logs;
+                        app.logs.clear();
+                        app.log_pods.clear();
+                        app.log_provider = None;
+                        app.log_following = true;
+                        if let (Some(client), Some(provider)) = (
+                            connected.clone(),
+                            app.provider_identities.get(&resource.id()).cloned(),
+                        ) {
+                            request_logs(tx.clone(), client, provider);
+                        } else {
+                            app.error = Some(if connected.is_none() {
+                                "Kubernetes client is not connected; refresh and try again".into()
+                            } else {
+                                "No installed Provider is associated with this ProviderConfig"
+                                    .into()
+                            });
+                            app.back();
+                        }
+                    }
+                }
             }
             KeyCode::Char('/') => {
                 app.input_mode = InputMode::Filter;
@@ -577,8 +885,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         View::Details => draw_details(frame, app, chunks[1]),
         View::Describe => draw_describe(frame, app, chunks[1]),
         View::Yaml => draw_yaml(frame, app, chunks[1]),
+        View::Logs => draw_logs(frame, app, chunks[1]),
         View::Events => draw_events(frame, app, chunks[1]),
-        View::Help => frame.render_widget(Paragraph::new("j/k move  Enter open  Esc back  p providers  / filter  : command  t tree/flat  y YAML  d details  e events  r refresh  ? help  q quit").wrap(Wrap { trim: true }), chunks[1]),
+        View::Help => frame.render_widget(Paragraph::new("j/k move  Enter open  Esc back  p providers  l logs  y YAML  / filter/search  : command  t tree/flat  d details  e events  r refresh  ? help  q quit").wrap(Wrap { trim: true }), chunks[1]),
     }
     let footer = if app.input_mode == InputMode::Filter {
         format!("/{}", app.input)
@@ -606,6 +915,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             View::System => "SYSTEM",
             View::Details => "DETAILS",
             View::Yaml => "YAML",
+            View::Logs => "LOGS",
             View::Events => "EVENTS",
             View::Describe => "DESCRIBE",
             View::Help => "HELP",
@@ -643,6 +953,14 @@ fn shortcuts(view: View) -> &'static [Shortcut] {
             S {
                 key: "<enter>",
                 description: "Open",
+            },
+            S {
+                key: "<l>",
+                description: "Logs",
+            },
+            S {
+                key: "<y>",
+                description: "YAML",
             },
             S {
                 key: "</>",
@@ -741,7 +1059,63 @@ fn shortcuts(view: View) -> &'static [Shortcut] {
                 description: "Quit",
             },
         ],
-        View::Yaml | View::Describe | View::Events => &[
+        View::Yaml => &[
+            S {
+                key: "<esc>",
+                description: "Back",
+            },
+            S {
+                key: "<j/k>",
+                description: "Scroll",
+            },
+            S {
+                key: "<g/G>",
+                description: "Top/Bottom",
+            },
+            S {
+                key: "</>",
+                description: "Search",
+            },
+            S {
+                key: "<x>",
+                description: "Reveal/Redact",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Logs => &[
+            S {
+                key: "<esc>",
+                description: "Back",
+            },
+            S {
+                key: "<j/k>",
+                description: "Scroll",
+            },
+            S {
+                key: "<f>",
+                description: "Follow/Pause",
+            },
+            S {
+                key: "<tab>",
+                description: "Next Pod",
+            },
+            S {
+                key: "</>",
+                description: "Search",
+            },
+            S {
+                key: "<g/G>",
+                description: "Top/Bottom",
+            },
+            S {
+                key: "<q>",
+                description: "Quit",
+            },
+        ],
+        View::Describe | View::Events => &[
             S {
                 key: "<esc>",
                 description: "Back",
@@ -975,30 +1349,19 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
     let narrow = area.width < 80;
     let rows: Vec<_> = entries
         .iter()
-        .filter_map(|entry| {
+        .map(|entry| {
             let ProviderEntry::Config(id) = entry;
-            let resource = app.resources.iter().find(|resource| resource.id() == *id)?;
-            let provider = resource
-                .provider_owner_uid
-                .as_deref()
-                .and_then(|uid| {
-                    app.resources
-                        .iter()
-                        .find(|candidate| candidate.uid.as_deref() == Some(uid))
-                        .and_then(|revision| {
-                            revision
-                                .original
-                                .pointer("/metadata/ownerReferences/0/name")
-                        })
-                        .and_then(Value::as_str)
-                })
+            let provider = app
+                .provider_identities
+                .get(id)
+                .map(|provider| provider.name.as_str())
                 .unwrap_or("-");
             let image = app
                 .provider_images
                 .get(id)
                 .map(String::as_str)
                 .unwrap_or("-");
-            Some((
+            (
                 labels
                     .get(id)
                     .map(String::as_str)
@@ -1007,7 +1370,7 @@ fn draw_providers(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layo
                 provider.to_owned(),
                 app.provider_resource_count(id),
                 image.to_owned(),
-            ))
+            )
         })
         .collect::<Vec<_>>();
     let column_widths = provider_column_widths(usize::from(area.width), &rows, !narrow);
@@ -1467,11 +1830,79 @@ fn detail_pair(label: &str, value: &str) -> Line<'static> {
 
 fn draw_yaml(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let text = app
-        .selected_resource()
-        .and_then(|resource| sanitized_yaml(&resource.original).ok())
-        .unwrap_or_else(|| "Could not render resource YAML".into());
+        .yaml_object
+        .as_ref()
+        .and_then(|object| {
+            if app.yaml_revealed {
+                serde_yaml::to_string(object).ok()
+            } else {
+                sanitized_yaml(object).ok()
+            }
+        })
+        .unwrap_or_else(|| "Loading YAML…".into());
+    let title = if app.yaml_revealed {
+        " YAML — ⚠ SENSITIVE VALUES REVEALED (x to redact) "
+    } else {
+        " YAML — REDACTED "
+    };
+    let text = if app.viewer_search.is_empty() {
+        text
+    } else {
+        text.lines()
+            .filter(|line| {
+                line.to_lowercase()
+                    .contains(&app.viewer_search.to_lowercase())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     frame.render_widget(
         Paragraph::new(text)
+            .block(Block::default().title(title).borders(Borders::NONE))
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll, 0)),
+        area,
+    );
+}
+
+fn draw_logs(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    let pod = app.log_pods.get(app.log_pod_selected);
+    let title = match (app.log_provider.as_deref(), pod) {
+        (Some(provider), Some(pod)) => format!(
+            " PROVIDER {provider}  POD {}/{}  {} ",
+            pod.namespace,
+            pod.name,
+            if app.log_following {
+                "FOLLOWING"
+            } else {
+                "PAUSED"
+            }
+        ),
+        _ => " PROVIDER LOGS ".into(),
+    };
+    if let Some(error) = &app.error {
+        frame.render_widget(
+            Paragraph::new(error.clone())
+                .block(Block::default().title(title).borders(Borders::ALL))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+    let lines: Vec<_> = app
+        .logs
+        .iter()
+        .filter(|line| {
+            app.viewer_search.is_empty()
+                || line
+                    .to_lowercase()
+                    .contains(&app.viewer_search.to_lowercase())
+        })
+        .map(|line| Line::from(line.clone()))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(title).borders(Borders::ALL))
             .wrap(Wrap { trim: false })
             .scroll((app.detail_scroll, 0)),
         area,
@@ -1549,46 +1980,60 @@ fn draw_events(frame: &mut ratatui::Frame<'_>, app: &App, area: ratatui::layout:
 }
 
 fn sanitized_yaml(value: &Value) -> Result<String, serde_yaml::Error> {
-    fn scrub(value: &Value) -> Value {
+    fn scrub(value: &Value, credential_scope: bool) -> Value {
         if let Some(object) = value.as_object() {
             let is_secret = object.get("kind").and_then(Value::as_str) == Some("Secret");
             let mut result = serde_json::Map::new();
             for (key, child) in object {
                 let normalized = key.to_lowercase();
-                let sensitive = [
-                    "password",
-                    "token",
-                    "apikey",
-                    "accesskey",
-                    "authorization",
-                    "bearer",
-                    "credential",
-                    "privatekey",
-                    "private_key",
-                    "clientsecret",
-                    "client_secret",
-                    "secretdata",
-                    "secret",
-                    "connectiondetails",
-                    "connectionstring",
-                    "certificate",
-                ]
-                .iter()
-                .any(|needle| normalized.contains(needle));
-                if (is_secret && (key == "data" || key == "stringData")) || sensitive {
+                let is_reference = normalized.ends_with("ref")
+                    || normalized.ends_with("refs")
+                    || normalized.ends_with("name");
+                let sensitive_key = !is_reference
+                    && (credential_scope
+                        || [
+                            "password",
+                            "token",
+                            "apikey",
+                            "accesskey",
+                            "authorization",
+                            "bearer",
+                            "credential",
+                            "privatekey",
+                            "private_key",
+                            "clientsecret",
+                            "client_secret",
+                            "secretdata",
+                            "secret",
+                            "connectiondetails",
+                            "connectionstring",
+                            "certificate",
+                        ]
+                        .iter()
+                        .any(|needle| normalized.contains(needle)));
+                if (is_secret && (key == "data" || key == "stringData"))
+                    || (sensitive_key && !child.is_object() && !child.is_array())
+                {
                     result.insert(key.clone(), Value::String("<redacted>".into()));
                 } else {
-                    result.insert(key.clone(), scrub(child));
+                    let child_scope =
+                        !is_reference && (credential_scope || normalized.contains("credential"));
+                    result.insert(key.clone(), scrub(child, child_scope));
                 }
             }
             Value::Object(result)
         } else if let Some(array) = value.as_array() {
-            Value::Array(array.iter().map(scrub).collect())
+            Value::Array(
+                array
+                    .iter()
+                    .map(|child| scrub(child, credential_scope))
+                    .collect(),
+            )
         } else {
             value.clone()
         }
     }
-    serde_yaml::to_string(&scrub(value))
+    serde_yaml::to_string(&scrub(value, false))
 }
 
 fn condition_span(condition: &Condition) -> Span<'static> {
@@ -1651,14 +2096,17 @@ fn tree_parent(app: &App, id: &crate::core::ResourceId) -> Option<crate::core::R
 
 #[cfg(test)]
 mod tests {
-    use super::{draw, sanitized_yaml, set_tree_mode};
+    use super::{draw, handle_key, sanitized_yaml, set_tree_mode};
     use crate::core::{
         crossplane::{normalize, CrdInfo},
         models::{Resource, ResourceFamily},
         relationships::RelationshipGraph,
     };
+    use crate::tui::app::{App, View};
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     fn rendered(
         app: &crate::tui::app::App,
@@ -1713,6 +2161,74 @@ mod tests {
         assert!(!yaml.contains("token-value"));
         assert!(yaml.contains("<redacted>"));
         assert!(yaml.contains("https://safe.example"));
+    }
+
+    #[test]
+    fn yaml_redaction_preserves_secret_references_and_resource_identity() {
+        let value = json!({
+            "apiVersion":"example.org/v1", "kind":"ProviderConfig",
+            "metadata":{"name":"vcd"},
+            "spec":{"credentials":{"source":"Secret","secretRef":{"name":"vcd-creds","namespace":"crossplane-system"},"clientSecret":"private-value"}}
+        });
+        let yaml = sanitized_yaml(&value).unwrap();
+        assert!(yaml.contains("apiVersion: example.org/v1"));
+        assert!(yaml.contains("vcd-creds"));
+        assert!(yaml.contains("crossplane-system"));
+        assert!(!yaml.contains("private-value"));
+    }
+
+    #[test]
+    fn provider_selector_yaml_reopens_redacted_and_restores_selection() {
+        let mut app = App::new("test".into());
+        app.view = View::Providers;
+        let mut config = test_resource("default");
+        config.kind = "ClusterProviderConfig".into();
+        config.family = ResourceFamily::ProviderConfig;
+        config.original["kind"] = json!("ClusterProviderConfig");
+        config.original["spec"] = json!({"token":"secret-value"});
+        app.replace_resources(vec![config], RelationshipGraph::default(), vec![]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(!handle_key(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            tx.clone(),
+            None,
+            None
+        ));
+        assert_eq!(app.view, View::Yaml);
+        assert!(!app.yaml_revealed);
+        assert!(!sanitized_yaml(app.yaml_object.as_ref().unwrap())
+            .unwrap()
+            .contains("secret-value"));
+        assert!(!handle_key(
+            &mut app,
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            tx.clone(),
+            None,
+            None
+        ));
+        assert!(app.yaml_revealed);
+        assert!(!handle_key(
+            &mut app,
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            tx.clone(),
+            None,
+            None
+        ));
+        assert_eq!(app.view, View::Providers);
+        assert_eq!(app.selected, 0);
+        assert!(!handle_key(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            tx,
+            None,
+            None
+        ));
+        assert!(!app.yaml_revealed);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use kube::{
-    api::{Api, DynamicObject, ListParams},
+    api::{Api, DynamicObject, ListParams, LogParams},
     core::{ApiResource, GroupVersionKind},
     discovery::{pinned_group, verbs, ApiCapabilities, Scope},
     Client, Config,
@@ -21,6 +21,76 @@ use crate::core::{
 };
 
 type DiscoveredVersion = std::result::Result<Vec<(ApiResource, ApiCapabilities)>, &'static str>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderPod {
+    pub name: String,
+    pub namespace: String,
+    pub ready: bool,
+    pub running: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderIdentity {
+    pub uid: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderAssociation {
+    pub provider: ProviderIdentity,
+    pub package: String,
+}
+
+fn sort_provider_pods(pods: &mut [ProviderPod]) {
+    pods.sort_by(|a, b| b.ready.cmp(&a.ready).then_with(|| a.name.cmp(&b.name)));
+}
+
+fn is_owned_by(object: &Value, kind: &str, uid: &str) -> bool {
+    object
+        .pointer("/metadata/ownerReferences")
+        .and_then(Value::as_array)
+        .is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner.get("kind").and_then(Value::as_str) == Some(kind)
+                    && owner.get("uid").and_then(Value::as_str) == Some(uid)
+            })
+        })
+}
+
+fn active_revision<'a>(revisions: &'a [Value], provider_uid: &str) -> Result<&'a Value> {
+    let active: Vec<_> = revisions
+        .iter()
+        .filter(|revision| {
+            revision
+                .pointer("/spec/desiredState")
+                .and_then(Value::as_str)
+                == Some("Active")
+                && is_owned_by(revision, "Provider", provider_uid)
+        })
+        .collect();
+    match active.as_slice() {
+        [revision] => Ok(revision),
+        [] => anyhow::bail!("No active ProviderRevision is owned by Provider UID {provider_uid}"),
+        _ => anyhow::bail!(
+            "Multiple active ProviderRevisions are owned by Provider UID {provider_uid}"
+        ),
+    }
+}
+
+fn owned_object<'a>(objects: &'a [Value], kind: &str, owner_uid: &str) -> Result<&'a Value> {
+    let matches: Vec<_> = objects
+        .iter()
+        .filter(|object| is_owned_by(object, kind, owner_uid))
+        .collect();
+    match matches.as_slice() {
+        [object] => Ok(object),
+        [] => anyhow::bail!("No controller Deployment is owned by the active ProviderRevision"),
+        _ => anyhow::bail!(
+            "Multiple controller Deployments are owned by the active ProviderRevision"
+        ),
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DiscoveryError {
@@ -58,6 +128,8 @@ pub struct DiscoveryReport {
     pub relationship_errors: Vec<DiscoveryError>,
     /// Installed package references resolved for ProviderConfigs through owner UIDs.
     pub provider_images: HashMap<crate::core::ResourceId, String>,
+    /// Provider identity resolved by the same owner-UID association as provider_images.
+    pub provider_identities: HashMap<crate::core::ResourceId, ProviderIdentity>,
     pub provider_package_diagnostics: Vec<String>,
 }
 
@@ -81,6 +153,206 @@ pub struct Kubernetes {
 }
 
 impl Kubernetes {
+    /// Fetch the current Kubernetes object represented by a discovered resource.
+    pub async fn get_object(&self, resource: &Resource) -> Result<Value> {
+        let version = resource.api_version.rsplit('/').next().unwrap_or("v1");
+        let group = resource.api_version.split('/').next().unwrap_or("");
+        let groups = pinned_group(&self.client, &kube::core::GroupVersion::gv(group, version))
+            .await
+            .context("Could not discover the selected resource API")?;
+        let (api_resource, capabilities) = groups
+            .versioned_resources(version)
+            .into_iter()
+            .find(|(api, _)| api.kind == resource.kind)
+            .context("The selected resource kind is no longer served")?;
+        let api: Api<DynamicObject> = match capabilities.scope {
+            Scope::Namespaced => Api::namespaced_with(
+                self.client.clone(),
+                resource
+                    .namespace
+                    .as_deref()
+                    .context("Resource namespace is unavailable")?,
+                &api_resource,
+            ),
+            Scope::Cluster => Api::all_with(self.client.clone(), &api_resource),
+        };
+        let object = api
+            .get(&resource.name)
+            .await
+            .context("Could not fetch the selected Kubernetes object")?;
+        serde_json::to_value(object).context("Could not decode the selected Kubernetes object")
+    }
+
+    /// Resolve the controller owned by an already-associated Provider and list its running Pods.
+    pub async fn provider_pods(&self, provider: &ProviderIdentity) -> Result<Vec<ProviderPod>> {
+        let revisions: Api<DynamicObject> = Api::all_with(
+            self.client.clone(),
+            &ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("pkg.crossplane.io", "v1", "ProviderRevision"),
+                "providerrevisions",
+            ),
+        );
+        let revision_values: Vec<Value> = revisions
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
+        let revision_value = active_revision(&revision_values, &provider.uid)?;
+        let revision_uid = revision_value
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .context("Active ProviderRevision has no UID")?;
+        let deployments: Api<DynamicObject> = Api::all_with(
+            self.client.clone(),
+            &ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("apps", "v1", "Deployment"),
+                "deployments",
+            ),
+        );
+        let deployment_values: Vec<Value> = deployments
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
+        let deployment_value = owned_object(&deployment_values, "ProviderRevision", revision_uid)?;
+        let deployment_uid = deployment_value
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .context("Controller Deployment has no UID")?;
+        let namespace = deployment_value
+            .pointer("/metadata/namespace")
+            .and_then(Value::as_str)
+            .context("Controller Deployment has no namespace")?;
+        let replicasets: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("apps", "v1", "ReplicaSet"),
+                "replicasets",
+            ),
+        );
+        let replica_values: Vec<Value> = replicasets
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
+        let owned_replicasets: Vec<_> = replica_values
+            .iter()
+            .filter(|replica| is_owned_by(replica, "Deployment", deployment_uid))
+            .collect();
+        let pods: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::from_gvk_with_plural(&GroupVersionKind::gvk("", "v1", "Pod"), "pods"),
+        );
+        let pod_values: Vec<Value> = pods
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
+        let replica_uids: std::collections::HashSet<_> = owned_replicasets
+            .iter()
+            .filter_map(|replica| replica.pointer("/metadata/uid").and_then(Value::as_str))
+            .collect();
+        let mut candidates: Vec<ProviderPod> = pod_values
+            .into_iter()
+            .filter_map(|value| {
+                let owned = replica_uids
+                    .iter()
+                    .any(|uid| is_owned_by(&value, "ReplicaSet", uid));
+                if !owned {
+                    return None;
+                }
+                let name = value.pointer("/metadata/name")?.as_str()?.to_owned();
+                let running =
+                    value.pointer("/status/phase").and_then(Value::as_str) == Some("Running");
+                let ready = value
+                    .pointer("/status/conditions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|c| {
+                        c.get("type").and_then(Value::as_str) == Some("Ready")
+                            && c.get("status").and_then(Value::as_str) == Some("True")
+                    });
+                Some(ProviderPod {
+                    name,
+                    namespace: namespace.to_owned(),
+                    ready,
+                    running,
+                })
+            })
+            .filter(|pod| pod.running)
+            .collect();
+        sort_provider_pods(&mut candidates);
+        if candidates.is_empty() {
+            anyhow::bail!(
+                "No running controller Pods are available for Provider {}",
+                provider.name
+            );
+        }
+        Ok(candidates)
+    }
+
+    pub async fn pod_logs(&self, pod: &ProviderPod, follow: bool) -> Result<String> {
+        let api: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), &pod.namespace);
+        api.logs(
+            &pod.name,
+            &LogParams {
+                tail_lines: Some(100),
+                timestamps: true,
+                follow,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(anyhow::Error::from)
+    }
+
+    pub async fn follow_pod_logs(
+        &self,
+        pod: ProviderPod,
+        tx: tokio::sync::mpsc::UnboundedSender<Result<String, String>>,
+    ) -> Result<()> {
+        use futures_util::io::AsyncBufReadExt;
+        let api: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), &pod.namespace);
+        let mut stream = api
+            .log_stream(
+                &pod.name,
+                &LogParams {
+                    tail_lines: Some(0),
+                    follow: true,
+                    timestamps: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if stream.read_line(&mut line).await? == 0 {
+                break;
+            }
+            if tx
+                .send(Ok(line.trim_end_matches(['\r', '\n']).to_owned()))
+                .is_err()
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn connect(context: Option<&str>) -> Result<Self> {
         let config = match context {
             Some(context) => Config::from_kubeconfig(&kube::config::KubeConfigOptions {
@@ -417,7 +689,7 @@ impl Kubernetes {
         let mut graph_identities = std::collections::HashSet::new();
         all_resources.retain(|resource| graph_identities.insert(resource.id()));
         let graph = RelationshipGraph::build(&all_resources);
-        let (provider_images, provider_package_diagnostics) =
+        let (provider_images, provider_identities, provider_package_diagnostics) =
             self.discover_provider_packages(&all_resources).await;
         for provider_config in all_resources
             .iter()
@@ -493,6 +765,7 @@ impl Kubernetes {
             errors,
             relationship_errors: reference_errors,
             provider_images,
+            provider_identities,
             provider_package_diagnostics,
         })
     }
@@ -500,7 +773,11 @@ impl Kubernetes {
     async fn discover_provider_packages(
         &self,
         resources: &[Resource],
-    ) -> (HashMap<crate::core::ResourceId, String>, Vec<String>) {
+    ) -> (
+        HashMap<crate::core::ResourceId, String>,
+        HashMap<crate::core::ResourceId, ProviderIdentity>,
+        Vec<String>,
+    ) {
         let api: Api<DynamicObject> = Api::all_with(
             self.client.clone(),
             &ApiResource::from_gvk_with_plural(
@@ -510,6 +787,7 @@ impl Kubernetes {
         );
         let Ok(list) = api.list(&ListParams::default()).await else {
             return (
+                HashMap::new(),
                 HashMap::new(),
                 vec!["Provider package discovery failed: could not list Providers from pkg.crossplane.io/v1.".into()],
             );
@@ -528,10 +806,20 @@ impl Kubernetes {
         if packages.is_empty() {
             return (
                 HashMap::new(),
+                HashMap::new(),
                 vec!["Provider package discovery returned no installed Providers.".into()],
             );
         }
-        resolve_provider_packages(resources, &packages)
+        let (associations, diagnostics) = resolve_provider_packages(resources, &packages);
+        let images = associations
+            .iter()
+            .map(|(id, association)| (id.clone(), association.package.clone()))
+            .collect();
+        let identities = associations
+            .into_iter()
+            .map(|(id, association)| (id, association.provider))
+            .collect();
+        (images, identities, diagnostics)
     }
 
     pub async fn list_events(&self, resource: &Resource) -> Result<Vec<Value>> {
@@ -717,7 +1005,10 @@ struct InstalledProvider {
 fn resolve_provider_packages(
     resources: &[Resource],
     packages: &[InstalledProvider],
-) -> (HashMap<crate::core::ResourceId, String>, Vec<String>) {
+) -> (
+    HashMap<crate::core::ResourceId, ProviderAssociation>,
+    Vec<String>,
+) {
     let mut resolved = HashMap::new();
     let mut diagnostics = Vec::new();
     for config in resources
@@ -775,7 +1066,16 @@ fn resolve_provider_packages(
             .collect();
         match matching_packages.as_slice() {
             [provider] => {
-                resolved.insert(config.id(), provider.package.clone());
+                resolved.insert(
+                    config.id(),
+                    ProviderAssociation {
+                        provider: ProviderIdentity {
+                            uid: provider.uid.clone(),
+                            name: provider.name.clone(),
+                        },
+                        package: provider.package.clone(),
+                    },
+                );
                 info!(provider = %provider.name, provider_config = %identity, "resolved ProviderConfig package by owner UID");
             }
             [] => diagnostics.push(format!(
@@ -960,6 +1260,91 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn provider_pod_selection_prefers_ready_and_keeps_candidates_separate() {
+        let mut pods = vec![
+            ProviderPod {
+                name: "z-unready".into(),
+                namespace: "crossplane-system".into(),
+                running: true,
+                ready: false,
+            },
+            ProviderPod {
+                name: "b-ready".into(),
+                namespace: "crossplane-system".into(),
+                running: true,
+                ready: true,
+            },
+            ProviderPod {
+                name: "a-ready".into(),
+                namespace: "crossplane-system".into(),
+                running: true,
+                ready: true,
+            },
+        ];
+        sort_provider_pods(&mut pods);
+        assert_eq!(
+            pods.iter().map(|pod| pod.name.as_str()).collect::<Vec<_>>(),
+            vec!["a-ready", "b-ready", "z-unready"]
+        );
+    }
+
+    #[test]
+    fn active_revision_uses_provider_uid_and_dynamic_object_metadata() {
+        let revision_uid = "revision-uid";
+        let revision = json!({
+            "apiVersion":"pkg.crossplane.io/v1",
+            "kind":"ProviderRevision",
+            "metadata":{"name":"provider-vcd-hash","uid":revision_uid,"ownerReferences":[{"apiVersion":"pkg.crossplane.io/v1","kind":"Provider","uid":"provider-uid"}]},
+            "spec":{"desiredState":"Active"}
+        });
+        let inactive = json!({
+            "apiVersion":"pkg.crossplane.io/v1","kind":"ProviderRevision",
+            "metadata":{"name":"old","uid":"old-revision","ownerReferences":[{"kind":"Provider","uid":"provider-uid"}]},
+            "spec":{"desiredState":"Inactive"}
+        });
+        let revisions = [inactive, revision.clone()];
+        let selected = active_revision(&revisions, "provider-uid").unwrap();
+        assert_eq!(
+            selected.pointer("/metadata/uid").and_then(Value::as_str),
+            Some(revision_uid)
+        );
+
+        let deployment = json!({"metadata":{"name":"controller","uid":"deployment-uid","ownerReferences":[{"kind":"ProviderRevision","uid":revision_uid}]}});
+        assert_eq!(
+            owned_object(&[deployment], "ProviderRevision", revision_uid)
+                .unwrap()
+                .pointer("/metadata/name")
+                .and_then(Value::as_str),
+            Some("controller")
+        );
+        assert!(active_revision(&[revision], "other-provider").is_err());
+    }
+
+    #[test]
+    fn controller_pod_chain_uses_owner_reference_uids() {
+        let replica_set = json!({
+            "metadata": {
+                "uid": "replicaset-uid",
+                "ownerReferences": [{"kind":"Deployment", "uid":"deployment-uid"}]
+            }
+        });
+        let pod = json!({
+            "metadata": {
+                "ownerReferences": [{"kind":"ReplicaSet", "uid":"replicaset-uid"}]
+            }
+        });
+
+        assert!(is_owned_by(&replica_set, "Deployment", "deployment-uid"));
+        assert!(is_owned_by(&pod, "ReplicaSet", "replicaset-uid"));
+        assert!(!is_owned_by(
+            &replica_set,
+            "Deployment",
+            "another-deployment"
+        ));
+        assert!(!is_owned_by(&pod, "ReplicaSet", "another-replicaset"));
+    }
+
     fn provider_config(group: &str, kind: &str, revision_uid: Option<&str>) -> Resource {
         let crd = CrdInfo {
             group: group.into(),
@@ -1033,18 +1418,36 @@ mod tests {
         ];
         let (resolved, diagnostics) = resolve_provider_packages(&resources, &packages);
         assert_eq!(
-            resolved.get(&configs[0].id()).map(String::as_str),
+            resolved
+                .get(&configs[0].id())
+                .map(|item| item.package.as_str()),
             Some(talos)
         );
         assert_eq!(
-            resolved.get(&configs[1].id()).map(String::as_str),
+            resolved
+                .get(&configs[1].id())
+                .map(|item| item.package.as_str()),
             Some(vcd)
         );
         assert_eq!(
-            resolved.get(&configs[2].id()).map(String::as_str),
+            resolved
+                .get(&configs[2].id())
+                .map(|item| item.package.as_str()),
             Some(vcd)
         );
         assert!(diagnostics.is_empty());
+        assert_eq!(
+            resolved.get(&configs[0].id()).unwrap().provider.name,
+            "provider-talos"
+        );
+        assert_eq!(
+            resolved.get(&configs[1].id()).unwrap().provider.name,
+            "provider-vcd"
+        );
+        assert_eq!(
+            resolved.get(&configs[2].id()).unwrap().provider.uid,
+            "vcd-provider"
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ Additional graph and TUI unit coverage:
 - Explicit tree rows retain branch depth, expand/collapse state, and selection across refresh; a known inverse `BELONGS_TO` relationship is projected as a parent-child path.
 - TUI filtering, history, tree/flat selection, and refresh preserve resource identity and view state.
 - YAML presentation redacts Secret payloads and credential-like values while retaining safe fields.
+- ProviderConfig YAML preserves selector state, supports explicit reveal/reset, and keeps Secret references visible.
 
 Run them with `devbox run test` or as part of `devbox run ci`.
 
@@ -62,5 +63,9 @@ These scenarios require a configured terminal and, where noted, a reachable clus
 | M18 | Navigate to a related resource in another ProviderConfig | The view switches to the target configuration and Esc restores the original details/list state | Cross-provider reference |
 | M19 | Use `:context <name>` | Discovery reconnects to the requested kubeconfig context without exiting the TUI | Two configured contexts |
 | M20 | Open YAML for Secret or credential-bearing objects | Secret payload and credential-like fields appear redacted | Fixture or test data |
+| M21 | Open logs from the VCD ClusterProviderConfig | Logs show the Provider and one running controller Pod, with timestamps and live follow controls | Cluster with Provider log RBAC |
+| M22 | Switch Provider Pods and return to the selector | `Tab`/`Shift+Tab` changes the displayed Pod; `Esc` cancels following and restores the selected ProviderConfig | Provider with multiple running Pods |
+| M23 | Inspect ProviderConfig YAML and reveal values | Actual manifest opens redacted; `x` shows a warning and toggles values in the fetched object; reopening redacts again | Credential-bearing ProviderConfig |
+| M24 | Open Provider logs from associated ProviderConfigs | Namespaced and cluster-scoped VCD configs resolve to provider-vcd; Talos resolves to provider-talos; ownership follows UID references through controller Pod | kind-local-dev with Provider log RBAC |
 
 Live-cluster behavior is verified only after x9s successfully connects to a cluster. Unit tests and local TUI startup do not establish Kubernetes connectivity.

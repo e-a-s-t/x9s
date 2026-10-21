@@ -13,6 +13,7 @@ pub enum View {
     System,
     Details,
     Yaml,
+    Logs,
     Events,
     Describe,
     Help,
@@ -62,6 +63,16 @@ pub struct App {
     pub crossplane_version: Option<String>,
     pub crossplane_version_diagnostic: Option<String>,
     pub provider_images: std::collections::HashMap<ResourceId, String>,
+    pub provider_identities:
+        std::collections::HashMap<ResourceId, crate::core::kubernetes::ProviderIdentity>,
+    pub yaml_object: Option<Value>,
+    pub yaml_revealed: bool,
+    pub viewer_search: String,
+    pub logs: Vec<String>,
+    pub log_provider: Option<String>,
+    pub log_pods: Vec<crate::core::kubernetes::ProviderPod>,
+    pub log_pod_selected: usize,
+    pub log_following: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +133,15 @@ impl App {
             crossplane_version: None,
             crossplane_version_diagnostic: None,
             provider_images: std::collections::HashMap::new(),
+            provider_identities: std::collections::HashMap::new(),
+            yaml_object: None,
+            yaml_revealed: false,
+            viewer_search: String::new(),
+            logs: Vec::new(),
+            log_provider: None,
+            log_pods: Vec::new(),
+            log_pod_selected: 0,
+            log_following: true,
         }
     }
 
@@ -419,6 +439,12 @@ impl App {
         self.visible_indices()
             .get(self.selected)
             .and_then(|index| self.resources.get(*index))
+    }
+
+    pub fn selected_provider_config(&self) -> Option<&Resource> {
+        let entries = self.visible_provider_entries();
+        let ProviderEntry::Config(id) = entries.get(self.selected)?;
+        self.resources.iter().find(|resource| resource.id() == *id)
     }
 
     pub fn related_resource_ids(&self) -> Vec<ResourceId> {

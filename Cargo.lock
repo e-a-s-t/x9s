@@ -2044,6 +2044,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "futures-util",
  "k8s-openapi",
  "kube",
  "ratatui",
